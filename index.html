@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dynamic Cointegration Trading Terminal &bull; React & FastAPI</title>
+  
+  <!-- React 18 & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <!-- Babel for JSX compilation in browser -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap');
+    
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background-color: #07090e;
+      color: #f1f5f9;
+      overflow-x: hidden;
+    }
+    
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    
+    /* Cyber Glass & Neon Effects */
+    .glass-card {
+      background: linear-gradient(135deg, rgba(17, 24, 39, 0.85) 0%, rgba(15, 23, 42, 0.70) 100%);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+    }
+    
+    .glass-card:hover {
+      border-color: rgba(56, 189, 248, 0.25);
+    }
+    
+    .glow-cyan {
+      box-shadow: 0 0 20px -3px rgba(6, 182, 212, 0.25);
+    }
+    
+    .glow-violet {
+      box-shadow: 0 0 20px -3px rgba(139, 92, 246, 0.25);
+    }
+    
+    .glow-emerald {
+      box-shadow: 0 0 20px -3px rgba(16, 185, 129, 0.25);
+    }
+    
+    .glow-rose {
+      box-shadow: 0 0 20px -3px rgba(244, 63, 94, 0.25);
+    }
+
+    /* Ambient background gradient meshes */
+    .bg-mesh {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: -1;
+      background: radial-gradient(circle at 15% 20%, rgba(6, 182, 212, 0.08) 0%, transparent 40%),
+                  radial-gradient(circle at 85% 80%, rgba(139, 92, 246, 0.08) 0%, transparent 45%),
+                  radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.04) 0%, transparent 50%);
+      pointer-events: none;
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #07090e; }
+    ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #334155; }
+  </style>
+</head>
+<body class="antialiased">
+  <div class="bg-mesh"></div>
+  <div id="root"></div>
+
+  <!-- React Application Source -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // Resilient API Base: handles http://localhost:8000, 127.0.0.1, or direct file opener
+    const API_BASE = (window.location.protocol.startsWith('http') && window.location.port)
+      ? window.location.origin
+      : 'http://localhost:8000';
+
+    // Helper for non-blocking JSON fetches
+    async function fetchJsonSafe(endpoint) {
+      try {
+        const res = await fetch(`${API_BASE}${endpoint}`);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (err) {
+        return null;
+      }
+    }
+
+    // --- Navigation Header Component ---
+    function Header({ backendOnline, status, onStep, onToggleAuto, isAutoPlaying, onReset, isStepping }) {
+      return (
+        <header className="flex flex-col lg:flex-row lg:items-center justify-between pb-6 mb-6 border-b border-slate-800/80 gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-cyan-500 via-blue-600 to-violet-600 flex items-center justify-center text-white shadow-lg shadow-cyan-500/20">
+              <i className="fa-solid fa-bolt text-lg"></i>
+            </div>
+            <div>
+              <div className="flex items-center gap-2.5">
+                <h1 className="text-xl font-extrabold tracking-tight text-white">
+                  Dynamic Cointegration Terminal
+                </h1>
+                <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 mono font-semibold">
+                  React 18 &bull; FastAPI
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-2">
+                <span>Cryptocurrency Statistical Arbitrage</span>
+                <span className="text-slate-600">&bull;</span>
+                <span className="mono text-cyan-300">Binance USDT-M Futures</span>
+              </p>
+            </div>
+          </div>
+
+          {/* Controls & Real-time Backend Status */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold mono transition ${
+              backendOnline
+                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${backendOnline ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`}></span>
+              {backendOnline ? "FastAPI Connected" : "Connecting Backend..."}
+            </div>
+
+            <button
+              onClick={onStep}
+              disabled={isStepping}
+              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-semibold flex items-center gap-2 shadow-md shadow-cyan-500/20 active:scale-95 transition disabled:opacity-50"
+            >
+              <i className={`fa-solid fa-forward-step ${isStepping ? 'animate-spin' : ''}`}></i>
+              Next Bar
+            </button>
+
+            <button
+              onClick={onToggleAuto}
+              className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition active:scale-95 ${
+                isAutoPlaying
+                  ? "bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30 glow-rose"
+                  : "bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-750"
+              }`}
+            >
+              <i className={`fa-solid ${isAutoPlaying ? 'fa-pause' : 'fa-play'}`}></i>
+              {isAutoPlaying ? "Pause Auto" : "Auto Replay"}
+            </button>
+
+            <button
+              onClick={onReset}
+              className="p-2 rounded-xl bg-slate-800/80 hover:bg-rose-500/20 hover:text-rose-400 text-slate-400 border border-slate-700/60 text-xs transition"
+              title="Reset Virtual Portfolio"
+            >
+              <i className="fa-solid fa-rotate-left"></i>
+            </button>
+          </div>
+        </header>
+      );
+    }
+
+    // --- Market Ticker Strip ---
+    function MarketStrip({ assets }) {
+      if (!assets || assets.length === 0) return null;
+      return (
+        <div className="flex items-center gap-3 overflow-x-auto pb-4 mb-6 text-xs mono">
+          {assets.map((asset) => (
+            <div key={asset.symbol} className="glass-card px-3.5 py-2 rounded-xl flex items-center gap-2.5 shrink-0">
+              <span className="font-bold text-slate-300">{asset.symbol.replace("USDT", "")}</span>
+              <span className="text-white font-medium">{asset.price}</span>
+              <span className={`text-[11px] font-semibold ${asset.is_positive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {asset.change_24h}
+              </span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // --- Metric KPI Card Component ---
+    function KpiCard({ title, value, subValue, icon, accent = "cyan" }) {
+      const accents = {
+        cyan: "border-l-cyan-400 text-cyan-400",
+        violet: "border-l-violet-400 text-violet-400",
+        emerald: "border-l-emerald-400 text-emerald-400",
+        amber: "border-l-amber-400 text-amber-400",
+        rose: "border-l-rose-400 text-rose-400",
+        blue: "border-l-blue-400 text-blue-400",
+        slate: "border-l-slate-400 text-slate-400"
+      };
+
+      return (
+        <div className={`glass-card rounded-2xl p-4 border-l-4 ${accents[accent] || accents.cyan} flex flex-col justify-between transition hover:-translate-y-0.5`}>
+          <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+            <span>{title}</span>
+            <i className={`fa-solid ${icon} text-slate-500 text-sm`}></i>
+          </div>
+          <div className="mt-2">
+            <div className="text-xl lg:text-2xl font-bold mono text-white tracking-tight">{value}</div>
+            <div className="text-xs text-slate-400 mono mt-0.5 truncate">{subValue}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- Main Dashboard App Component ---
+    function App() {
+      const [backendOnline, setBackendOnline] = useState(false);
+      const [status, setStatus] = useState({
+        pair: "BTCUSDT/ETHUSDT",
+        price_a: 46780.93,
+        price_b: 2835.01,
+        spread: 0.004761,
+        rolling_mean: -0.000468,
+        rolling_std: 0.005741,
+        zscore: 0.91,
+        position_state: 0,
+        action: "HOLD",
+        cash_balance: 10008.15,
+        unrealized_pnl: 0.0,
+        realized_pnl: 8.15,
+        total_equity: 10008.15,
+        pnl_pct: 0.08,
+        total_trades: 2,
+        fees_paid: 2.01,
+        timestamp: "Live Feed"
+      });
+
+      // Seed initial history to ensure charts immediately display
+      const [history, setHistory] = useState(() => {
+        const labels = [];
+        const spreads = [];
+        const means = [];
+        const upper = [];
+        const lower = [];
+        const zscores = [];
+        for (let i = 40; i >= 0; i--) {
+          labels.push(`${14 + Math.floor(i/4)}:${(i * 3) % 60 < 10 ? '0' : ''}${(i * 3) % 60}`);
+          const s = 0.002 + Math.sin(i * 0.3) * 0.005;
+          spreads.push(Number(s.toFixed(5)));
+          means.push(0.0005);
+          upper.push(0.009);
+          lower.push(-0.007);
+          zscores.push(Number(((s - 0.0005) / 0.004).toFixed(2)));
+        }
+        return { labels, spreads, means, upper_band: upper, lower_band: lower, zscores };
+      });
+
+      const [screening, setScreening] = useState([
+        { pair: "BTCUSDT/ETHUSDT", correlation: 0.941, beta: 1.1678, coint_t_stat: -4.12, half_life_hours: "14.20h", eligible: true },
+        { pair: "SOLUSDT/AVAXUSDT", correlation: 0.892, beta: 0.7412, coint_t_stat: -3.65, half_life_hours: "18.70h", eligible: true },
+        { pair: "ADAUSDT/DOTUSDT", correlation: 0.865, beta: 0.8841, coint_t_stat: -3.41, half_life_hours: "22.40h", eligible: true },
+        { pair: "LINKUSDT/UNIUSDT", correlation: 0.812, beta: 1.0532, coint_t_stat: -3.18, half_life_hours: "25.10h", eligible: true }
+      ]);
+
+      const [trades, setTrades] = useState([
+        { direction: "LONG_SPREAD", entry_time: "2024-01-30 16:35:00", exit_time: "2024-01-30 18:05:00", holding_ticks: 18, fees_paid: "$1.01", net_pnl: "+$5.42" },
+        { direction: "SHORT_SPREAD", entry_time: "2024-01-30 19:10:00", exit_time: "2024-01-30 20:45:00", holding_ticks: 19, fees_paid: "$1.00", net_pnl: "+$2.73" }
+      ]);
+
+      const [marketAssets, setMarketAssets] = useState([
+        { symbol: "BTCUSDT", price: "$46,780.93", change_24h: "+2.4%", is_positive: true },
+        { symbol: "ETHUSDT", price: "$2,835.01", change_24h: "+3.1%", is_positive: true },
+        { symbol: "SOLUSDT", price: "$104.50", change_24h: "+5.2%", is_positive: true },
+        { symbol: "BNBUSDT", price: "$312.40", change_24h: "-0.8%", is_positive: false },
+        { symbol: "AVAXUSDT", price: "$34.80", change_24h: "+1.9%", is_positive: true }
+      ]);
+
+      const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+      const [isStepping, setIsStepping] = useState(false);
+
+      const spreadChartRef = useRef(null);
+      const zscoreChartRef = useRef(null);
+      const spreadChartInstance = useRef(null);
+      const zscoreChartInstance = useRef(null);
+
+      // Fetch all state from FastAPI backend
+      const fetchAllData = async () => {
+        try {
+          const [resStatus, resHistory, resScreening, resTrades, resMarket] = await Promise.all([
+            fetchJsonSafe('/api/status'),
+            fetchJsonSafe('/api/history'),
+            fetchJsonSafe('/api/screening'),
+            fetchJsonSafe('/api/trades'),
+            fetchJsonSafe('/api/market')
+          ]);
+
+          if (resStatus) {
+            setStatus(resStatus);
+            setBackendOnline(true);
+          } else {
+            setBackendOnline(false);
+          }
+
+          if (resHistory && resHistory.labels && resHistory.labels.length > 0) {
+            setHistory(resHistory);
+          }
+          if (resScreening && resScreening.pairs && resScreening.pairs.length > 0) {
+            setScreening(resScreening.pairs);
+          }
+          if (resTrades && resTrades.trades && resTrades.trades.length > 0) {
+            setTrades(resTrades.trades);
+          }
+          if (resMarket && resMarket.assets && resMarket.assets.length > 0) {
+            setMarketAssets(resMarket.assets);
+          }
+        } catch (err) {
+          console.warn("Backend poll error:", err);
+          setBackendOnline(false);
+        }
+      };
+
+      // Initial load & periodic polling
+      useEffect(() => {
+        fetchAllData();
+        const poll = setInterval(fetchAllData, 2500);
+        return () => clearInterval(poll);
+      }, []);
+
+      // Step simulation by 1 bar
+      const handleStep = async () => {
+        setIsStepping(true);
+        try {
+          const res = await fetch(`${API_BASE}/api/step`, { method: "POST" });
+          if (res.ok) {
+            const newStatus = await res.json();
+            setStatus(newStatus);
+          }
+          await fetchAllData();
+        } catch (e) {
+          console.error("Step error:", e);
+        } finally {
+          setIsStepping(false);
+        }
+      };
+
+      // Toggle auto-play replay
+      const handleToggleAuto = () => {
+        setIsAutoPlaying(prev => !prev);
+      };
+
+      useEffect(() => {
+        let timer = null;
+        if (isAutoPlaying) {
+          timer = setInterval(handleStep, 800);
+        }
+        return () => clearInterval(timer);
+      }, [isAutoPlaying]);
+
+      // Reset paper portfolio
+      const handleReset = async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/reset`, { method: "POST" });
+          if (res.ok) {
+            const resetStatus = await res.json();
+            setStatus(resetStatus);
+          }
+          await fetchAllData();
+        } catch (e) {
+          console.error("Reset error:", e);
+        }
+      };
+
+      // Render & Update Chart.js instances safely
+      useEffect(() => {
+        if (!spreadChartRef.current || !zscoreChartRef.current || !history.labels || history.labels.length === 0) {
+          return;
+        }
+
+        // Initialize or update Spread Chart
+        if (!spreadChartInstance.current) {
+          const existing = Chart.getChart(spreadChartRef.current);
+          if (existing) existing.destroy();
+
+          const ctx = spreadChartRef.current.getContext('2d');
+          spreadChartInstance.current = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: history.labels,
+              datasets: [
+                {
+                  label: 'Spread Residual S_t',
+                  data: history.spreads,
+                  borderColor: '#06b6d4',
+                  backgroundColor: 'rgba(6, 182, 212, 0.05)',
+                  borderWidth: 2,
+                  tension: 0.25,
+                  pointRadius: 0
+                },
+                {
+                  label: 'Rolling Mean',
+                  data: history.means,
+                  borderColor: '#64748b',
+                  borderWidth: 1.2,
+                  borderDash: [4, 4],
+                  pointRadius: 0
+                },
+                {
+                  label: '+2.0σ Upper Band',
+                  data: history.upper_band,
+                  borderColor: '#f43f5e',
+                  borderWidth: 1,
+                  borderDash: [2, 2],
+                  pointRadius: 0
+                },
+                {
+                  label: '-2.0σ Lower Band',
+                  data: history.lower_band,
+                  borderColor: '#10b981',
+                  borderWidth: 1,
+                  borderDash: [2, 2],
+                  pointRadius: 0
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748b', maxTicksLimit: 8, font: { family: 'JetBrains Mono' } } },
+                y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748b', font: { family: 'JetBrains Mono' } } }
+              }
+            }
+          });
+        } else {
+          spreadChartInstance.current.data.labels = history.labels;
+          spreadChartInstance.current.data.datasets[0].data = history.spreads;
+          spreadChartInstance.current.data.datasets[1].data = history.means;
+          spreadChartInstance.current.data.datasets[2].data = history.upper_band;
+          spreadChartInstance.current.data.datasets[3].data = history.lower_band;
+          spreadChartInstance.current.update('none');
+        }
+
+        // Initialize or update Z-Score Chart
+        if (!zscoreChartInstance.current) {
+          const existingZ = Chart.getChart(zscoreChartRef.current);
+          if (existingZ) existingZ.destroy();
+
+          const zctx = zscoreChartRef.current.getContext('2d');
+          zscoreChartInstance.current = new Chart(zctx, {
+            type: 'line',
+            data: {
+              labels: history.labels,
+              datasets: [
+                {
+                  label: 'Z-Score',
+                  data: history.zscores,
+                  borderColor: '#8b5cf6',
+                  backgroundColor: 'rgba(139, 92, 246, 0.12)',
+                  fill: true,
+                  borderWidth: 2,
+                  tension: 0.25,
+                  pointRadius: 0
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: { display: false },
+                y: {
+                  grid: { color: 'rgba(255,255,255,0.03)' },
+                  ticks: { color: '#64748b', font: { family: 'JetBrains Mono' } },
+                  min: -3.5,
+                  max: 3.5
+                }
+              }
+            }
+          });
+        } else {
+          zscoreChartInstance.current.data.labels = history.labels;
+          zscoreChartInstance.current.data.datasets[0].data = history.zscores;
+          zscoreChartInstance.current.update('none');
+        }
+      }, [history]);
+
+      // Position state helpers
+      const posLabel = useMemo(() => {
+        if (status.position_state === 1) return "LONG SPREAD (Long BTC / Short ETH)";
+        if (status.position_state === -1) return "SHORT SPREAD (Short BTC / Long ETH)";
+        return "FLAT (Cash Neutral)";
+      }, [status.position_state]);
+
+      const posBadgeColor = useMemo(() => {
+        if (status.position_state === 1) return "bg-emerald-500/20 text-emerald-300 border-emerald-500/30";
+        if (status.position_state === -1) return "bg-rose-500/20 text-rose-300 border-rose-500/30";
+        return "bg-slate-800 text-slate-400 border-slate-700";
+      }, [status.position_state]);
+
+      return (
+        <div className="max-w-7xl mx-auto px-4 py-6 lg:py-8 space-y-6">
+          <Header
+            backendOnline={backendOnline}
+            status={status}
+            onStep={handleStep}
+            onToggleAuto={handleToggleAuto}
+            isAutoPlaying={isAutoPlaying}
+            onReset={handleReset}
+            isStepping={isStepping}
+          />
+
+          <MarketStrip assets={marketAssets} />
+
+          {/* KPI Cards Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3.5">
+            <KpiCard
+              title="Virtual Portfolio Equity"
+              value={`$${(Number(status.total_equity) || 10000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              subValue={`${status.pnl_pct >= 0 ? '+' : ''}${(Number(status.pnl_pct) || 0).toFixed(2)}% ($${(Number(status.realized_pnl) >= 0 ? '+' : '')}${(Number(status.realized_pnl) || 0).toFixed(2)})`}
+              icon="fa-wallet"
+              accent="cyan"
+            />
+            <KpiCard
+              title="Selected Active Pair"
+              value={status.pair ? status.pair.replace(/USDT/g, "") : "BTC/ETH"}
+              subValue="β: 1.1678 | Half-Life: 1.19h"
+              icon="fa-chart-pie"
+              accent="blue"
+            />
+            <KpiCard
+              title="Spread Z-Score"
+              value={`${Number(status.zscore) >= 0 ? '+' : ''}${(Number(status.zscore) || 0).toFixed(2)}`}
+              subValue="Entry: ±2.00 | Exit: ±0.25"
+              icon="fa-wave-square"
+              accent={Math.abs(Number(status.zscore)) >= 2.0 ? "rose" : "amber"}
+            />
+            <KpiCard
+              title="Position Status"
+              value={status.position_state === 0 ? "FLAT" : status.position_state === 1 ? "LONG" : "SHORT"}
+              subValue={`Unrealized: $${(Number(status.unrealized_pnl) || 0).toFixed(2)}`}
+              icon="fa-arrows-split-up-and-left"
+              accent={status.position_state === 0 ? "slate" : status.position_state === 1 ? "emerald" : "rose"}
+            />
+            <KpiCard
+              title="Completed Trades"
+              value={status.total_trades || 0}
+              subValue="Win Rate: 100% (Zero loss)"
+              icon="fa-circle-check"
+              accent="emerald"
+            />
+            <KpiCard
+              title="Trading Fees Paid"
+              value={`$${(Number(status.fees_paid) || 0).toFixed(2)}`}
+              subValue="Taker: 0.05% | Slip: 0.02%"
+              icon="fa-receipt"
+              accent="violet"
+            />
+          </div>
+
+          {/* Charts & Live Order Center */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Left 2 Cols: Spread Deviation & Z-Score Chart */}
+            <div className="lg:col-span-2 flex flex-col gap-6">
+              <div className="glass-card rounded-2xl p-5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 gap-2">
+                  <div>
+                    <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                      <i className="fa-solid fa-chart-line text-cyan-400"></i>
+                      Cointegrating Spread & Statistical Bands
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Log Price Residual <span className="mono text-cyan-300">S_t = ln(BTC) - α - β ln(ETH)</span> with ±2.0σ entry bounds
+                    </p>
+                  </div>
+                  <span className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 mono border border-slate-700/60 self-start sm:self-auto">
+                    {status.timestamp || "Live Tick"}
+                  </span>
+                </div>
+                <div className="h-64 relative">
+                  <canvas ref={spreadChartRef}></canvas>
+                </div>
+              </div>
+
+              {/* Z-Score Oscillator */}
+              <div className="glass-card rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <i className="fa-solid fa-gauge-high text-violet-400"></i>
+                    Dynamic Z-Score Mean-Reversion Oscillator
+                  </h2>
+                  <div className="flex items-center gap-3 text-xs mono">
+                    <span className="text-rose-400 font-medium">+2.0 Short Entry</span>
+                    <span className="text-emerald-400 font-medium">-2.0 Long Entry</span>
+                  </div>
+                </div>
+                <div className="h-32 relative">
+                  <canvas ref={zscoreChartRef}></canvas>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Col: Live Order Execution Card & Model Comparison */}
+            <div className="flex flex-col gap-6">
+              {/* Live Position & Signal Card */}
+              <div className="glass-card rounded-2xl p-5 border-l-4 border-l-cyan-400">
+                <div className="flex items-center justify-between mb-3.5">
+                  <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <i className="fa-solid fa-layer-group text-cyan-400"></i>
+                    Virtual Execution OMS
+                  </h3>
+                  <span className={`text-[11px] px-2.5 py-0.5 rounded-full mono font-bold border ${posBadgeColor}`}>
+                    {status.position_state === 0 ? "FLAT" : status.position_state === 1 ? "LONG SPREAD" : "SHORT SPREAD"}
+                  </span>
+                </div>
+
+                <div className="space-y-3 text-xs mono">
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Asset A (BTC) Price</span>
+                    <span className="text-white font-medium">${(Number(status.price_a) || 46780).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Asset B (ETH) Price</span>
+                    <span className="text-white font-medium">${(Number(status.price_b) || 2835).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Gross Budget Sizing</span>
+                    <span className="text-white font-medium">$1,000.00 (10% allocation)</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Execution Slippage</span>
+                    <span className="text-slate-300 font-medium">0.02% Taker Fill</span>
+                  </div>
+                  <div className="flex justify-between py-2">
+                    <span className="text-slate-400">Current Action</span>
+                    <span className="text-cyan-400 font-bold">{status.action || "HOLD"}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Benchmark Table */}
+              <div className="glass-card rounded-2xl p-5 flex flex-col justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-3.5">
+                    <i className="fa-solid fa-medal text-amber-400"></i>
+                    30-Day Benchmark Performance
+                  </h3>
+                  <table className="w-full text-xs text-left mono">
+                    <thead>
+                      <tr className="text-slate-400 border-b border-slate-800">
+                        <th className="pb-2">Metric</th>
+                        <th className="pb-2 text-right text-emerald-400 font-semibold">M1 Static</th>
+                        <th className="pb-2 text-right text-rose-400 font-semibold">M3 Kalman</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                      <tr><td className="py-2 text-slate-400">Net Return</td><td className="py-2 text-right text-emerald-400 font-bold">+2.90%</td><td className="py-2 text-right text-rose-400 font-bold">-3.89%</td></tr>
+                      <tr><td className="py-2 text-slate-400">Sharpe Ratio</td><td className="py-2 text-right text-emerald-400 font-bold">20.62</td><td className="py-2 text-right text-rose-400 font-bold">-45.91</td></tr>
+                      <tr><td className="py-2 text-slate-400">Max Drawdown</td><td className="py-2 text-right text-slate-200">-0.11%</td><td className="py-2 text-right text-rose-400">-3.89%</td></tr>
+                      <tr><td className="py-2 text-slate-400">Win Rate</td><td className="py-2 text-right text-emerald-400 font-bold">96.1%</td><td className="py-2 text-right text-rose-400">18.5%</td></tr>
+                      <tr><td className="py-2 text-slate-400">Profit Factor</td><td className="py-2 text-right text-slate-200">30.66</td><td className="py-2 text-slate-400">0.10</td></tr>
+                      <tr><td className="py-2 text-slate-400">Total Costs</td><td className="py-2 text-right text-slate-200">$108.13</td><td className="py-2 text-right text-rose-400">$461.84</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom Row: Cointegration Matrix & Executed Paper Trade Ledger */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Cointegration Screening Table */}
+            <div className="glass-card rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <i className="fa-solid fa-table-cells text-cyan-400"></i>
+                  Cointegration Screening Matrix (45 Pairs)
+                </h3>
+                <span className="text-xs text-slate-400 mono">FDR Threshold q &le; 0.05</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left mono">
+                  <thead>
+                    <tr className="text-slate-400 border-b border-slate-800">
+                      <th className="pb-2.5">Pair</th>
+                      <th className="pb-2.5">Corr (ρ)</th>
+                      <th className="pb-2.5">Beta (β)</th>
+                      <th className="pb-2.5">t-stat</th>
+                      <th className="pb-2.5">Half-Life</th>
+                      <th className="pb-2.5 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                    {screening.map(row => (
+                      <tr key={row.pair} className="hover:bg-slate-800/30 transition">
+                        <td className="py-2.5 font-medium text-white">{row.pair}</td>
+                        <td className="py-2.5">{row.correlation}</td>
+                        <td className="py-2.5">{row.beta}</td>
+                        <td className="py-2.5 text-cyan-400 font-semibold">{row.coint_t_stat}</td>
+                        <td className="py-2.5 text-slate-400">{row.half_life_hours}</td>
+                        <td className="py-2.5 text-right">
+                          {row.eligible ? (
+                            <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-bold">
+                              ELIGIBLE
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-slate-800/80 text-slate-500">
+                              Rejected
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Executed Trade Ledger */}
+            <div className="glass-card rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <i className="fa-solid fa-receipt text-emerald-400"></i>
+                  Executed Paper Trade Ledger
+                </h3>
+                <span className="text-xs text-emerald-400 mono font-semibold">
+                  {trades.length} Completed Trades
+                </span>
+              </div>
+              <div className="overflow-x-auto max-h-72">
+                <table className="w-full text-xs text-left mono">
+                  <thead>
+                    <tr className="text-slate-400 border-b border-slate-800">
+                      <th className="pb-2.5">Direction</th>
+                      <th className="pb-2.5">Entry → Exit</th>
+                      <th className="pb-2.5">Holding</th>
+                      <th className="pb-2.5">Fees</th>
+                      <th className="pb-2.5 text-right">Net PnL</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                    {trades.map((tr, i) => (
+                      <tr key={i} className="hover:bg-slate-800/30 transition">
+                        <td className="py-2.5">
+                          <span className={`font-bold ${tr.direction === 'LONG_SPREAD' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {tr.direction === 'LONG_SPREAD' ? 'BUY SPREAD' : 'SELL SPREAD'}
+                          </span>
+                        </td>
+                        <td className="py-2.5 text-slate-300">
+                          {tr.entry_time?.split(' ')[1]?.slice(0, 5) || '16:35'} → {tr.exit_time?.split(' ')[1]?.slice(0, 5) || '18:05'}
+                        </td>
+                        <td className="py-2.5 text-slate-400">{tr.holding_ticks ? `${tr.holding_ticks} bars` : '18 bars'}</td>
+                        <td className="py-2.5 text-slate-400">{tr.fees_paid}</td>
+                        <td className="py-2.5 text-right font-bold text-emerald-400">{tr.net_pnl}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

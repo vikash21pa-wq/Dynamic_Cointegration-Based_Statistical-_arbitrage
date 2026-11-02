@@ -1,5 +1,15 @@
 # Dynamic Cointegration-Based Statistical Arbitrage in Cryptocurrency Markets
 
+[![GitHub Pages Frontend](https://img.shields.io/badge/Live%20Frontend-GitHub%20Pages-06b6d4?style=for-the-badge&logo=react&logoColor=white)](https://vikash21pa-wq.github.io/Dynamic_Cointegration-Based_Statistical-_arbitrage/)
+[![FastAPI Backend](https://img.shields.io/badge/FastAPI-Backend%20API-10b981?style=for-the-badge&logo=fastapi&logoColor=white)](http://localhost:8000)
+[![Swagger API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-8b5cf6?style=for-the-badge&logo=swagger&logoColor=white)](http://localhost:8000/docs)
+[![Deploy to Render](https://img.shields.io/badge/Deploy%20Backend-Render%20Cloud-black?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/vikash21pa-wq/Dynamic_Cointegration-Based_Statistical-_arbitrage)
+
+> **Live Links to Open Dashboard & Backend:**
+> - 🌐 **[Click to Open Live Frontend Dashboard](https://vikash21pa-wq.github.io/Dynamic_Cointegration-Based_Statistical-_arbitrage/)** (Hosted on GitHub Pages)
+> - ⚡ **[Click to Open Local FastAPI Server](http://localhost:8000)** (When running `app.py` or `run_dashboard.bat`)
+> - 📖 **[Click to Open Interactive Swagger API Docs](http://localhost:8000/docs)** (Full interactive REST API playground)
+
 Research-grade quantitative trading framework for high-frequency cryptocurrency pairs trading and dynamic statistical arbitrage.
 
 ## System Architecture
