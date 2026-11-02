@@ -5,6 +5,7 @@ for paper trading, cointegration screening, history charts, and benchmark metric
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -36,6 +37,12 @@ app.add_middleware(
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 engine = PaperTradingEngine(pair="BTCUSDT/ETHUSDT")
 step_index = 0
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render/Cloud load balancers."""
+    return {"status": "ok", "app": "crypto-stat-arb-backend"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -249,14 +256,16 @@ async def reset_portfolio():
 
 
 def start():
-    """Starts the FastAPI web server on port 8000."""
+    """Starts the FastAPI web server with dynamic port resolution for Render/Cloud."""
+    port = int(os.environ.get("PORT", 8000))
+    host = "0.0.0.0"
     print("=" * 65)
     print("  LAUNCHING QUANTITATIVE CRYPTO STATISTICAL ARBITRAGE DASHBOARD")
     print("=" * 65)
-    print("  Web Interface : http://localhost:8000")
-    print("  API Docs      : http://localhost:8000/docs")
+    print(f"  Listening on  : http://{host}:{port}")
+    print(f"  API Docs      : http://{host}:{port}/docs")
     print("=" * 65)
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
