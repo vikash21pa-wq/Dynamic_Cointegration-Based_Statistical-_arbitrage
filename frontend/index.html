@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Statistical Arbitrage & Paper Trading Terminal</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #0b0e14; color: #e2e8f0; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .glass-panel { background: rgba(18, 24, 38, 0.85); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.07); }
+    .neon-border-green { border-color: rgba(34, 197, 94, 0.4); box-shadow: 0 0 15px rgba(34, 197, 94, 0.15); }
+    .neon-border-blue { border-color: rgba(59, 130, 246, 0.4); box-shadow: 0 0 15px rgba(59, 130, 246, 0.15); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0b0e14; }
+    ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #334155; }
+  </style>
+</head>
+<body class="min-h-screen p-4 lg:p-6 antialiased">
+  <!-- Top Navigation Bar -->
+  <header class="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-6 border-b border-slate-800 gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/20">
+        <i class="fa-solid fa-chart-line text-lg"></i>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+          Dynamic Cointegration Terminal
+          <span class="text-xs px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 mono font-medium">Binance USDT-M</span>
+        </h1>
+        <p class="text-xs text-slate-400">High-Frequency Pairs Trading & Paper Trading Execution</p>
+      </div>
+    </div>
+
+    <!-- Live Status Pill & Quick Controls -->
+    <div class="flex items-center gap-3 flex-wrap">
+      <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        Zero-Secret Paper Trading Online
+      </div>
+      <button id="btnStep" onclick="stepSimulation()" class="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-2 transition shadow-md shadow-blue-600/20 active:scale-95">
+        <i class="fa-solid fa-forward-step"></i> Next Bar
+      </button>
+      <button id="btnAutoPlay" onclick="toggleAutoPlay()" class="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 transition active:scale-95">
+        <i class="fa-solid fa-play" id="playIcon"></i> <span id="playText">Auto Replay</span>
+      </button>
+      <button onclick="resetPortfolio()" class="px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 border border-slate-700/60 text-xs font-medium transition" title="Reset Portfolio">
+        <i class="fa-solid fa-rotate-left"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Metric KPI Cards -->
+  <section class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+    <div class="glass-panel rounded-xl p-4">
+      <span class="text-xs text-slate-400 font-medium">Net Virtual Equity</span>
+      <div class="text-xl font-bold mono text-white mt-1" id="kpiEquity">$10,008.15</div>
+      <div class="text-xs text-emerald-400 mono mt-0.5" id="kpiReturn">+0.08% ($+8.15)</div>
+    </div>
+    <div class="glass-panel rounded-xl p-4">
+      <span class="text-xs text-slate-400 font-medium">Target Pair</span>
+      <div class="text-xl font-bold mono text-cyan-400 mt-1" id="kpiPair">BTC/ETH</div>
+      <div class="text-xs text-slate-400 mono mt-0.5">β: 1.1678 | HL: 1.19h</div>
+    </div>
+    <div class="glass-panel rounded-xl p-4">
+      <span class="text-xs text-slate-400 font-medium">Current Spread Z-Score</span>
+      <div class="text-xl font-bold mono text-amber-400 mt-1" id="kpiZscore">+0.91</div>
+      <div class="text-xs text-slate-400 mono mt-0.5">Entry: ±2.0 | Exit: ±0.25</div>
+    </div>
+    <div class="glass-panel rounded-xl p-4">
+      <span class="text-xs text-slate-400 font-medium">Active Position</span>
+      <div class="text-lg font-bold mono text-slate-300 mt-1" id="kpiPosition">FLAT</div>
+      <div class="text-xs text-slate-400 mono mt-0.5" id="kpiUnrealized">Unrealized: $0.00</div>
+    </div>
+    <div class="glass-panel rounded-xl p-4">
+      <span class="text-xs text-slate-400 font-medium">Completed Trades</span>
+      <div class="text-xl font-bold mono text-white mt-1" id="kpiTrades">2</div>
+      <div class="text-xs text-emerald-400 mono mt-0.5">Win Rate: 100%</div>
+    </div>
+    <div class="glass-panel rounded-xl p-4">
+      <span class="text-xs text-slate-400 font-medium">Exchange Fees Paid</span>
+      <div class="text-xl font-bold mono text-slate-200 mt-1" id="kpiFees">$2.01</div>
+      <div class="text-xs text-slate-400 mono mt-0.5">Taker: 0.05% | Slip: 0.02%</div>
+    </div>
+  </section>
+
+  <!-- Main Chart & Trading Grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+    <!-- Left 2 Cols: Spread Time Series & Z-Score Chart -->
+    <div class="lg:col-span-2 flex flex-col gap-6">
+      <div class="glass-panel rounded-xl p-5">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-sm font-semibold text-white flex items-center gap-2">
+              <i class="fa-solid fa-wave-square text-cyan-400"></i> Spread Deviation & Threshold Channels
+            </h2>
+            <p class="text-xs text-slate-400">Log Price Residual $S_t = \ln(BTC) - \alpha - \beta \ln(ETH)$ with $\pm 2.0\sigma$ Entry & $\pm 0.25\sigma$ Convergence</p>
+          </div>
+          <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 mono" id="tickTimestamp">2024-01-30 23:55:00 UTC</span>
+        </div>
+        <div class="h-64 relative">
+          <canvas id="spreadChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Z-Score Oscillator -->
+      <div class="glass-panel rounded-xl p-5">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold text-white flex items-center gap-2">
+            <i class="fa-solid fa-gauge text-blue-400"></i> Rolling Z-Score Oscillator
+          </h2>
+          <div class="flex items-center gap-3 text-xs mono">
+            <span class="text-rose-400">Overvalued (+2.0)</span>
+            <span class="text-emerald-400">Undervalued (-2.0)</span>
+          </div>
+        </div>
+        <div class="h-36 relative">
+          <canvas id="zscoreChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Col: Live Order Execution Card & Model Comparison -->
+    <div class="flex flex-col gap-6">
+      <!-- Live Position & Signal Card -->
+      <div class="glass-panel rounded-xl p-5 border-l-4 border-l-blue-500">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+            <i class="fa-solid fa-arrows-split-up-and-left text-blue-400"></i> Virtual Pair Execution
+          </h3>
+          <span class="text-xs px-2 py-0.5 rounded font-mono font-semibold" id="badgeState">FLAT</span>
+        </div>
+        <div class="space-y-3 text-xs mono">
+          <div class="flex justify-between py-1.5 border-b border-slate-800/80">
+            <span class="text-slate-400">BTC Leg (A)</span>
+            <span class="text-white font-medium" id="legA">$46,780.93 (Flat)</span>
+          </div>
+          <div class="flex justify-between py-1.5 border-b border-slate-800/80">
+            <span class="text-slate-400">ETH Leg (B)</span>
+            <span class="text-white font-medium" id="legB">$2,835.01 (Flat)</span>
+          </div>
+          <div class="flex justify-between py-1.5 border-b border-slate-800/80">
+            <span class="text-slate-400">Gross Budget Allocation</span>
+            <span class="text-white font-medium">$1,000.00 (10.0%)</span>
+          </div>
+          <div class="flex justify-between py-1.5 border-b border-slate-800/80">
+            <span class="text-slate-400">Execution Slippage</span>
+            <span class="text-slate-300 font-medium">0.02% Taker Fill</span>
+          </div>
+          <div class="flex justify-between py-1.5">
+            <span class="text-slate-400">Signal Status</span>
+            <span class="text-cyan-400 font-semibold" id="sigAction">WAITING FOR EXCURSION</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- M1 vs M3 Benchmark Card -->
+      <div class="glass-panel rounded-xl p-5">
+        <h3 class="text-sm font-semibold text-white flex items-center gap-2 mb-3">
+          <i class="fa-solid fa-trophy text-amber-400"></i> 30-Day Benchmark Comparison
+        </h3>
+        <table class="w-full text-xs text-left mono">
+          <thead>
+            <tr class="text-slate-400 border-b border-slate-800">
+              <th class="pb-2">Metric</th>
+              <th class="pb-2 text-right text-emerald-400">M1 (Static)</th>
+              <th class="pb-2 text-right text-rose-400">M3 (Kalman)</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800/50 text-slate-300">
+            <tr><td class="py-1.5">Total Return</td><td class="py-1.5 text-right font-semibold text-emerald-400">+2.90%</td><td class="py-1.5 text-right font-semibold text-rose-400">-3.89%</td></tr>
+            <tr><td class="py-1.5">Sharpe Ratio</td><td class="py-1.5 text-right font-semibold text-emerald-400">20.62</td><td class="py-1.5 text-right font-semibold text-rose-400">-45.91</td></tr>
+            <tr><td class="py-1.5">Max Drawdown</td><td class="py-1.5 text-right">-0.11%</td><td class="py-1.5 text-right">-3.89%</td></tr>
+            <tr><td class="py-1.5">Win Rate</td><td class="py-1.5 text-right font-semibold text-emerald-400">96.1%</td><td class="py-1.5 text-right font-semibold text-rose-400">18.5%</td></tr>
+            <tr><td class="py-1.5">Profit Factor</td><td class="py-1.5 text-right">30.66</td><td class="py-1.5 text-right">0.10</td></tr>
+            <tr><td class="py-1.5">Avg Hold Time</td><td class="py-1.5 text-right">2.15h</td><td class="py-1.5 text-right">0.15h</td></tr>
+            <tr><td class="py-1.5">Total Costs</td><td class="py-1.5 text-right">$108.13</td><td class="py-1.5 text-right">$461.84</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Tables: Cointegration Screening Matrix & Executed Paper Trades -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Cointegration Screening Leaderboard -->
+    <div class="glass-panel rounded-xl p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+          <i class="fa-solid fa-list-check text-blue-400"></i> Cointegration Screening Matrix (Top Pairs)
+        </h3>
+        <span class="text-xs text-slate-400 mono">FDR Corrected (q &le; 0.05)</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs text-left mono">
+          <thead>
+            <tr class="text-slate-400 border-b border-slate-800">
+              <th class="pb-2">Pair</th>
+              <th class="pb-2">Corr (ρ)</th>
+              <th class="pb-2">Beta (β)</th>
+              <th class="pb-2">Coint t-stat</th>
+              <th class="pb-2">Half-Life</th>
+              <th class="pb-2 text-right">Status</th>
+            </tr>
+          </thead>
+          <tbody id="screeningTableBody" class="divide-y divide-slate-800/50 text-slate-300">
+            <!-- Injected dynamically -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Paper Trade Execution Ledger -->
+    <div class="glass-panel rounded-xl p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-sm font-semibold text-white flex items-center gap-2">
+          <i class="fa-solid fa-receipt text-emerald-400"></i> Paper Trade Execution Ledger
+        </h3>
+        <span class="text-xs text-slate-400 mono" id="tradeCountLabel">2 Completed Trades</span>
+      </div>
+      <div class="overflow-x-auto max-h-72">
+        <table class="w-full text-xs text-left mono">
+          <thead>
+            <tr class="text-slate-400 border-b border-slate-800">
+              <th class="pb-2">Direction</th>
+              <th class="pb-2">Entry &rarr; Exit</th>
+              <th class="pb-2">Holding</th>
+              <th class="pb-2">Fees</th>
+              <th class="pb-2 text-right">Net PnL</th>
+            </tr>
+          </thead>
+          <tbody id="tradeLedgerBody" class="divide-y divide-slate-800/50 text-slate-300">
+            <!-- Injected dynamically -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Initialize Data & Charts
+    let spreadChart, zscoreChart;
+    let autoPlayInterval = null;
+    let currentIndex = 0;
+    let simulationData = [];
+
+    const screeningData = [
+      { pair: "BTCUSDT/ETHUSDT", corr: "0.821", beta: "1.1678", tstat: "-14.64", hl: "1.19h", eligible: true },
+      { pair: "ETHUSDT/BNBUSDT", corr: "0.530", beta: "1.1152", tstat: "-12.70", hl: "1.56h", eligible: false },
+      { pair: "BTCUSDT/BNBUSDT", corr: "0.646", beta: "1.3096", tstat: "-11.98", hl: "1.83h", eligible: false },
+      { pair: "BNBUSDT/XRPUSDT", corr: "0.180", beta: "0.3689", tstat: "-4.27",  hl: "10.1h", eligible: false },
+      { pair: "BNBUSDT/AVAXUSDT",corr: "0.161", beta: "0.2920", tstat: "-4.20",  hl: "13.5h", eligible: false },
+      { pair: "ETHUSDT/XRPUSDT", corr: "0.222", beta: "0.4218", tstat: "-4.00",  hl: "14.9h", eligible: false }
+    ];
+
+    let paperTrades = [
+      {
+        direction: "SHORT_SPREAD",
+        entry: "16:35",
+        exit: "18:05",
+        holding: "18 bars (1.5h)",
+        fees: "$1.01",
+        pnl: "+$4.33",
+        isProfit: true
+      },
+      {
+        direction: "LONG_SPREAD",
+        entry: "21:15",
+        exit: "22:45",
+        holding: "18 bars (1.5h)",
+        fees: "$1.00",
+        pnl: "+$3.82",
+        isProfit: true
+      }
+    ];
+
+    function initCharts() {
+      const labels = [];
+      const spreads = [];
+      const means = [];
+      const upperEntry = [];
+      const lowerEntry = [];
+      const zscores = [];
+
+      // Generate synthetic historical sample
+      let baseSpread = 0.0;
+      for (let i = 0; i < 40; i++) {
+        labels.push(`${i * 5}m`);
+        const spread = -0.002 + Math.sin(i * 0.2) * 0.006 + (Math.random() - 0.5) * 0.002;
+        spreads.push(spread);
+        means.push(0.0);
+        upperEntry.push(0.008);
+        lowerEntry.push(-0.008);
+        zscores.push(spread / 0.004);
+      }
+
+      const spreadCtx = document.getElementById('spreadChart').getContext('2d');
+      spreadChart = new Chart(spreadCtx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              label: 'Spread Residual S_t',
+              data: spreads,
+              borderColor: '#06b6d4',
+              borderWidth: 2,
+              tension: 0.2,
+              pointRadius: 0
+            },
+            {
+              label: 'Rolling Mean',
+              data: means,
+              borderColor: '#64748b',
+              borderWidth: 1,
+              borderDash: [4, 4],
+              pointRadius: 0
+            },
+            {
+              label: '+2.0σ Upper Threshold',
+              data: upperEntry,
+              borderColor: '#f43f5e',
+              borderWidth: 1,
+              borderDash: [2, 2],
+              pointRadius: 0
+            },
+            {
+              label: '-2.0σ Lower Threshold',
+              data: lowerEntry,
+              borderColor: '#10b981',
+              borderWidth: 1,
+              borderDash: [2, 2],
+              pointRadius: 0
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b', maxTicksLimit: 8 } },
+            y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748b' } }
+          }
+        }
+      });
+
+      const zCtx = document.getElementById('zscoreChart').getContext('2d');
+      zscoreChart = new Chart(zCtx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              label: 'Z-Score',
+              data: zscores,
+              borderColor: '#3b82f6',
+              backgroundColor: 'rgba(59, 130, 246, 0.1)',
+              fill: true,
+              borderWidth: 1.8,
+              tension: 0.2,
+              pointRadius: 0
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { display: false },
+            y: {
+              grid: { color: 'rgba(255,255,255,0.04)' },
+              ticks: { color: '#64748b' },
+              min: -3.0,
+              max: 3.0
+            }
+          }
+        }
+      });
+    }
+
+    function renderScreeningTable() {
+      const tbody = document.getElementById('screeningTableBody');
+      tbody.innerHTML = '';
+      screeningData.forEach(row => {
+        const badge = row.eligible
+          ? `<span class="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">ELIGIBLE</span>`
+          : `<span class="px-2 py-0.5 rounded bg-slate-800 text-slate-400">Rejected (ρ < 0.7)</span>`;
+        tbody.innerHTML += `
+          <tr class="hover:bg-slate-800/30 transition">
+            <td class="py-2 text-white font-medium">${row.pair}</td>
+            <td class="py-2">${row.corr}</td>
+            <td class="py-2">${row.beta}</td>
+            <td class="py-2 text-cyan-400">${row.tstat}</td>
+            <td class="py-2">${row.hl}</td>
+            <td class="py-2 text-right">${badge}</td>
+          </tr>
+        `;
+      });
+    }
+
+    function renderTradeLedger() {
+      const tbody = document.getElementById('tradeLedgerBody');
+      tbody.innerHTML = '';
+      paperTrades.forEach(tr => {
+        const dirBadge = tr.direction === 'LONG_SPREAD'
+          ? `<span class="text-emerald-400 font-semibold">BUY SPREAD</span>`
+          : `<span class="text-rose-400 font-semibold">SELL SPREAD</span>`;
+        tbody.innerHTML += `
+          <tr class="hover:bg-slate-800/30 transition">
+            <td class="py-2">${dirBadge}</td>
+            <td class="py-2 text-slate-300">${tr.entry} &rarr; ${tr.exit}</td>
+            <td class="py-2 text-slate-400">${tr.holding}</td>
+            <td class="py-2 text-slate-400">${tr.fees}</td>
+            <td class="py-2 text-right font-semibold text-emerald-400">${tr.pnl}</td>
+          </tr>
+        `;
+      });
+      document.getElementById('tradeCountLabel').innerText = `${paperTrades.length} Completed Trades`;
+    }
+
+    function stepSimulation() {
+      // Add a simulated tick
+      const lastZ = zscoreChart.data.datasets[0].data.slice(-1)[0];
+      const newZ = (lastZ * 0.85 + (Math.random() - 0.48) * 0.8).toFixed(2);
+      const newSpread = (newZ * 0.004).toFixed(6);
+
+      document.getElementById('kpiZscore').innerText = (newZ >= 0 ? '+' : '') + newZ;
+      if (Math.abs(newZ) >= 2.0) {
+        document.getElementById('sigAction').innerText = newZ > 0 ? 'ENTRY: SHORT SPREAD' : 'ENTRY: LONG SPREAD';
+        document.getElementById('sigAction').className = newZ > 0 ? 'text-rose-400 font-semibold' : 'text-emerald-400 font-semibold';
+      } else if (Math.abs(newZ) <= 0.25) {
+        document.getElementById('sigAction').innerText = 'CONVERGENCE EXIT ZONE';
+        document.getElementById('sigAction').className = 'text-cyan-400 font-semibold';
+      } else {
+        document.getElementById('sigAction').innerText = 'HOLDING / MONITORING';
+        document.getElementById('sigAction').className = 'text-slate-400 font-medium';
+      }
+
+      // Update Chart
+      const labels = spreadChart.data.labels;
+      labels.shift();
+      labels.push(`${currentIndex * 5}m`);
+      currentIndex++;
+
+      spreadChart.data.datasets[0].data.shift();
+      spreadChart.data.datasets[0].data.push(parseFloat(newSpread));
+      spreadChart.update('none');
+
+      zscoreChart.data.datasets[0].data.shift();
+      zscoreChart.data.datasets[0].data.push(parseFloat(newZ));
+      zscoreChart.update('none');
+    }
+
+    function toggleAutoPlay() {
+      if (autoPlayInterval) {
+        clearInterval(autoPlayInterval);
+        autoPlayInterval = null;
+        document.getElementById('playIcon').className = 'fa-solid fa-play';
+        document.getElementById('playText').innerText = 'Auto Replay';
+      } else {
+        autoPlayInterval = setInterval(stepSimulation, 600);
+        document.getElementById('playIcon').className = 'fa-solid fa-pause';
+        document.getElementById('playText').innerText = 'Pause Replay';
+      }
+    }
+
+    function resetPortfolio() {
+      document.getElementById('kpiEquity').innerText = '$10,000.00';
+      document.getElementById('kpiReturn').innerText = '+0.00% ($+0.00)';
+      document.getElementById('kpiTrades').innerText = '0';
+      document.getElementById('kpiFees').innerText = '$0.00';
+      document.getElementById('badgeState').innerText = 'FLAT';
+      document.getElementById('badgeState').className = 'text-xs px-2 py-0.5 rounded font-mono font-semibold bg-slate-800 text-slate-400';
+      paperTrades = [];
+      renderTradeLedger();
+    }
+
+    window.onload = function() {
+      initCharts();
+      renderScreeningTable();
+      renderTradeLedger();
+    };
+  </script>
+</body>
+</html>
