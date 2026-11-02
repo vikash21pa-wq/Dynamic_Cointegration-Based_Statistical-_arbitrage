@@ -1,0 +1,12 @@
+Metric,M1 (Static OLS),M3 (Kalman Filter)
+Total Net Return (%),2.90%,-3.89%
+Annualized Return (%),41.63%,-38.32%
+Annualized Sharpe Ratio,20.62,-45.91
+Annualized Sortino Ratio,17.65,-28.74
+Maximum Drawdown (%),-0.11%,-3.89%
+Calmar Ratio,387.59,-9.84
+Total Trades Completed,76,336
+Win Rate (%),96.1%,18.5%
+Profit Factor,30.66,0.10
+Avg Holding Time (Hours),2.2h,0.1h
+Total Trading Costs ($),$108.13,$461.84

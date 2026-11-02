@@ -1,0 +1,20 @@
+{
+    "timestamp": "2024-01-30 23:55:00+00:00",
+    "pair": "BTCUSDT/ETHUSDT",
+    "price_a": 46780.928594375655,
+    "price_b": 2835.009325421129,
+    "spread": 0.004761414389770735,
+    "rolling_mean": -0.0004680318274438526,
+    "rolling_std": 0.005740978761461143,
+    "zscore": 0.9108980253192289,
+    "position_state": 0,
+    "action": "HOLD",
+    "reason": "",
+    "cash_balance": 10008.150459395076,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 8.150459395075146,
+    "total_equity": 10008.150459395076,
+    "pnl_pct": 0.08150459395075814,
+    "total_trades": 2,
+    "fees_paid": 2.009215647033173
+}

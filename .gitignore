@@ -1,0 +1,17 @@
+# Environment & Credentials
+.env
+*.env
+.env.*
+
+# Python & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Data & Virtualenv
+.venv/
+env/
+venv/
+*.log
+
