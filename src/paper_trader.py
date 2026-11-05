@@ -5,9 +5,11 @@ Manages virtual portfolio, order execution simulation with fees/slippage,
 and ledger persistence.
 """
 
+import asyncio
 import json
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -78,6 +80,121 @@ BINANCE_FUTURES_RULES: Dict[str, SymbolRules] = {
     "AVAXUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=3),
     "LTCUSDT": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=2),
 }
+
+
+class BinanceMultiplexPriceStream:
+    """
+    Real-Time WebSocket Client connecting to Binance USDT-M Futures multiplex stream:
+        wss://fstream.binance.com/ws/<asset_a>@bookTicker/<asset_b>@bookTicker
+    Receives simultaneous, zero-latency bid/ask updates for both legs with automatic
+    reconnection, keepalive handling, and thread-safe price caching.
+    """
+
+    def __init__(self, asset_a: str, asset_b: str):
+        self.asset_a = asset_a.upper()
+        self.asset_b = asset_b.upper()
+        self.stream_url = (
+            f"wss://fstream.binance.com/ws/"
+            f"{self.asset_a.lower()}@bookTicker/{self.asset_b.lower()}@bookTicker"
+        )
+        self.prices: Dict[str, float] = {}
+        self.bids: Dict[str, float] = {}
+        self.asks: Dict[str, float] = {}
+        self.last_updated: Dict[str, float] = {}
+        self.is_connected: bool = False
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def handle_message(self, raw_msg: str):
+        """Parses incoming multiplex bookTicker JSON and updates thread-safe price cache."""
+        try:
+            data = json.loads(raw_msg)
+            payload = data.get("data", data)
+            sym = payload.get("s")
+            if sym in (self.asset_a, self.asset_b):
+                bid = float(payload["b"])
+                ask = float(payload["a"])
+                mid = (bid + ask) / 2.0
+                now = time.time()
+                with self._lock:
+                    self.prices[sym] = mid
+                    self.bids[sym] = bid
+                    self.asks[sym] = ask
+                    self.last_updated[sym] = now
+                    self.is_connected = True
+        except Exception as e:
+            logger.debug(f"Error parsing Binance WS multiplex bookTicker payload: {e}")
+
+    def get_latest_prices(self, max_staleness_seconds: float = 10.0) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Returns (price_a, price_b) from live WebSocket stream if both are within staleness limit.
+        """
+        now = time.time()
+        with self._lock:
+            p_a = self.prices.get(self.asset_a)
+            p_b = self.prices.get(self.asset_b)
+            t_a = self.last_updated.get(self.asset_a, 0.0)
+            t_b = self.last_updated.get(self.asset_b, 0.0)
+
+            if p_a is not None and p_b is not None:
+                if (now - t_a) <= max_staleness_seconds and (now - t_b) <= max_staleness_seconds:
+                    return p_a, p_b
+        return None, None
+
+    async def _async_run(self):
+        """Asynchronous listener with exponential backoff auto-reconnect."""
+        try:
+            import websockets
+        except ImportError:
+            logger.warning("websockets package not installed; multiplex stream unavailable.")
+            return
+
+        backoff = 1.0
+        while self._running:
+            try:
+                async with websockets.connect(self.stream_url, ping_interval=20, ping_timeout=10) as ws:
+                    self.is_connected = True
+                    backoff = 1.0
+                    logger.info(f"Connected to Binance Multiplex WebSocket: {self.stream_url}")
+                    while self._running:
+                        try:
+                            msg = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                            self.handle_message(msg)
+                        except asyncio.TimeoutError:
+                            pong_waiter = await ws.ping()
+                            await asyncio.wait_for(pong_waiter, timeout=5.0)
+            except Exception as e:
+                self.is_connected = False
+                if not self._running:
+                    break
+                logger.debug(f"Binance Multiplex WS stream disconnected: {e}. Reconnecting in {backoff:.1f}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+
+    def _thread_worker(self):
+        """Worker thread executing private event loop."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._async_run())
+        finally:
+            loop.close()
+
+    def start(self):
+        """Spawns background daemon thread for streaming."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._thread_worker, daemon=True, name="BinanceMultiplexStream")
+        self._thread.start()
+
+    def stop(self):
+        """Gracefully halts WebSocket stream and joins worker thread."""
+        self._running = False
+        self.is_connected = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.5)
 
 
 class PaperAccount:
@@ -298,6 +415,7 @@ class PaperTradingEngine:
         self.leverage = self.account.leverage
         self.last_rejection_reason: Optional[str] = None
         self.last_funding_period_id: Optional[int] = None
+        self.price_stream: Optional[BinanceMultiplexPriceStream] = None
         self.spread_history: List[float] = []
         self.current_position_state: int = 0  # 0: Flat, +1: Long spread, -1: Short spread
         self.bars_in_trade: int = 0
@@ -403,12 +521,32 @@ class PaperTradingEngine:
             except Exception as e:
                 logger.warning(f"Could not warm up spread history: {e}")
 
+    def start_price_stream(self):
+        """Initializes and connects zero-latency Binance multiplex WebSocket price stream."""
+        if self.price_stream is None:
+            self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
+        self.price_stream.start()
+        logger.info(f"Started multiplex WebSocket price stream for {self.pair_name}")
+
+    def stop_price_stream(self):
+        """Halts the multiplex WebSocket price stream."""
+        if self.price_stream is not None:
+            self.price_stream.stop()
+            logger.info(f"Stopped multiplex WebSocket price stream for {self.pair_name}")
+
     def fetch_live_prices(self) -> Tuple[Optional[float], Optional[float]]:
         """
         Fetches current market mid-prices for Asset A and Asset B from Binance.
-        Uses public REST ticker endpoints (no authentication required).
-        Fetches all tickers in a single batch roundtrip to eliminate inter-leg latency skew.
+        Priority 1: Zero-latency Binance WebSocket multiplex stream (wss://fstream.binance.com/ws/...).
+        Priority 2: Fallback to Binance Futures REST API batch bookTicker.
         """
+        # 1. Attempt WebSocket multiplex stream read first
+        if self.price_stream is not None and self.price_stream.is_connected:
+            p_a, p_b = self.price_stream.get_latest_prices(max_staleness_seconds=10.0)
+            if p_a is not None and p_b is not None:
+                return p_a, p_b
+
+        # 2. REST Batch Fallback
         url = "https://fapi.binance.com/fapi/v1/ticker/bookTicker"
         try:
             resp = requests.get(url, timeout=3.5)
@@ -426,7 +564,7 @@ class PaperTradingEngine:
         except Exception:
             pass
 
-        # Fallback to individual requests if batch fails
+        # 3. Fallback to individual requests if batch fails
         prices = {}
         for sym in [self.asset_a, self.asset_b]:
             try:
@@ -737,6 +875,9 @@ class PaperTradingEngine:
             "total_funding_paid": round(self.account.total_funding_paid, 4),
             "last_funding_period_id": self.last_funding_period_id,
             "funding_settled": funding_settled,
+            # Data Feed & Stream Latency Telemetry
+            "feed_source": "WEBSOCKET_MULTIPLEX" if (self.price_stream and self.price_stream.is_connected) else "REST_POLLING",
+            "stream_connected": bool(self.price_stream and self.price_stream.is_connected),
             # Position & Trade Lifecycle State
             "positions": positions_dict,
             "current_trade_meta": self.current_trade_meta,

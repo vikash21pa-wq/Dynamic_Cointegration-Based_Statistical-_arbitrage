@@ -143,9 +143,15 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"State file load warning: {e}")
 
-    # 3. Launch the autonomous background worker (disabled during automated test runs)
+    # 3. Launch live multiplex WebSocket stream & autonomous background worker
     worker_task = None
     if not os.environ.get("PYTEST_CURRENT_TEST"):
+        try:
+            engine.start_price_stream()
+            logger.info("Binance Futures Multiplex WebSocket stream started.")
+        except Exception as e:
+            logger.warning(f"Could not start Binance multiplex stream: {e}")
+
         worker_state["running"] = True
         worker_task = asyncio.create_task(background_trading_worker())
         logger.info("Autonomous Paper Trading Background Worker started.")
@@ -155,6 +161,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # 4. Graceful shutdown
+    try:
+        engine.stop_price_stream()
+    except Exception:
+        pass
+
     if worker_task:
         logger.info("FastAPI server shutting down; stopping background worker...")
         worker_state["running"] = False
@@ -290,6 +301,7 @@ async def get_trading_status() -> Dict[str, Any]:
 @app.get("/api/worker")
 async def get_worker_status() -> Dict[str, Any]:
     """Returns real-time diagnostics of the autonomous background trading worker."""
+    stream_conn = bool(engine.price_stream and engine.price_stream.is_connected)
     return {
         "status": "running" if worker_state["running"] else "stopped",
         "mode": worker_state["mode"],
@@ -300,6 +312,8 @@ async def get_worker_status() -> Dict[str, Any]:
         "error_count": worker_state["error_count"],
         "consecutive_failures": worker_state["consecutive_failures"],
         "active_websockets": len(active_websockets),
+        "feed_source": "WEBSOCKET_MULTIPLEX" if stream_conn else "REST_POLLING",
+        "stream_connected": stream_conn,
     }
 
 

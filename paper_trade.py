@@ -65,8 +65,9 @@ def print_dashboard(snapshot: dict, api_key: str, mode: str = "LIVE"):
 
 
 def run_live(engine: PaperTradingEngine, interval: int = 5):
-    """Continuous live market price monitoring loop."""
-    print("Starting Live Paper Trading Monitor... (Press Ctrl+C to stop)")
+    """Continuous live market price monitoring loop using Binance multiplex WebSocket stream."""
+    print("Starting Live Paper Trading Monitor with Binance Multiplex WebSocket... (Press Ctrl+C to stop)")
+    engine.start_price_stream()
     try:
         while True:
             price_a, price_b = engine.fetch_live_prices()
@@ -76,10 +77,13 @@ def run_live(engine: PaperTradingEngine, interval: int = 5):
                 continue
 
             snapshot = engine.process_tick(price_a, price_b)
-            print_dashboard(snapshot, paper_config.api_key, mode="LIVE (POLLING)")
+            feed_label = f"LIVE ({snapshot.get('feed_source', 'STREAM')})"
+            print_dashboard(snapshot, paper_config.api_key, mode=feed_label)
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nPaper Trading stopped by user.")
+    finally:
+        engine.stop_price_stream()
 
 
 def run_replay(engine: PaperTradingEngine, speed: float = 0.05, n_bars: int = 200):
