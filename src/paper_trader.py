@@ -7,6 +7,7 @@ and ledger persistence.
 
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -53,6 +54,30 @@ class CandleBar:
     close_b: float
     ticks: int
     close_spread: float
+
+
+@dataclass(frozen=True)
+class SymbolRules:
+    step_size: float
+    min_qty: float
+    min_notional: float
+    qty_precision: int
+    price_precision: int
+
+
+# Official Binance USDT-M Perpetual Futures Specifications for the Universe
+BINANCE_FUTURES_RULES: Dict[str, SymbolRules] = {
+    "BTCUSDT": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=1),
+    "ETHUSDT": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=2),
+    "BNBUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=2),
+    "SOLUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=2),
+    "XRPUSDT": SymbolRules(step_size=0.1, min_qty=0.1, min_notional=5.0, qty_precision=1, price_precision=4),
+    "ADAUSDT": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=4),
+    "DOGEUSDT": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=5),
+    "LINKUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=3),
+    "AVAXUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=3),
+    "LTCUSDT": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=2),
+}
 
 
 class PaperAccount:
@@ -157,6 +182,8 @@ class PaperTradingEngine:
         self.emergency_threshold = emergency_threshold
         self.candle_minutes = candle_minutes
         self.candle_seconds = candle_minutes * 60
+        self.min_order_notional: float = trading_config.min_order_notional
+        self.symbol_rules: Dict[str, SymbolRules] = dict(BINANCE_FUTURES_RULES)
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -401,14 +428,22 @@ class PaperTradingEngine:
             # Check entry conditions
             if zscore <= -self.entry_threshold:
                 # Undervalued spread -> Long spread (Buy A, Sell B)
-                self._open_spread_position(target_state=1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
-                action_taken = "OPEN_LONG_SPREAD"
-                reason = f"Z-score {zscore:.2f} <= -{self.entry_threshold}"
+                success = self._open_spread_position(target_state=1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
+                if success:
+                    action_taken = "OPEN_LONG_SPREAD"
+                    reason = f"Z-score {zscore:.2f} <= -{self.entry_threshold}"
+                else:
+                    action_taken = "REJECTED_ORDER"
+                    reason = "Exchange lot size / minimum notional check failed"
             elif zscore >= self.entry_threshold:
                 # Overvalued spread -> Short spread (Sell A, Buy B)
-                self._open_spread_position(target_state=-1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
-                action_taken = "OPEN_SHORT_SPREAD"
-                reason = f"Z-score {zscore:.2f} >= +{self.entry_threshold}"
+                success = self._open_spread_position(target_state=-1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
+                if success:
+                    action_taken = "OPEN_SHORT_SPREAD"
+                    reason = f"Z-score {zscore:.2f} >= +{self.entry_threshold}"
+                else:
+                    action_taken = "REJECTED_ORDER"
+                    reason = "Exchange lot size / minimum notional check failed"
         else:
             # Check exit conditions
             should_exit = False
@@ -491,14 +526,123 @@ class PaperTradingEngine:
         self._save_state(snapshot)
         return snapshot
 
-    def _open_spread_position(self, target_state: int, price_a: float, price_b: float, timestamp_str: str):
-        """Sizes and fills both legs for spread entry."""
+    def get_symbol_rules(self, symbol: str) -> SymbolRules:
+        """Returns exchange sizing rules for symbol, with safe fallback defaults."""
+        sym = symbol.upper()
+        if sym in self.symbol_rules:
+            return self.symbol_rules[sym]
+        return SymbolRules(
+            step_size=0.001,
+            min_qty=0.001,
+            min_notional=self.min_order_notional,
+            qty_precision=3,
+            price_precision=2
+        )
+
+    def round_lot_size(
+        self,
+        symbol: str,
+        raw_qty: float,
+        price: float
+    ) -> Tuple[float, Optional[str]]:
+        """
+        Rounds/truncates raw contract quantity to exchange step size (flooring to
+        prevent exceeding margin allocation) and validates minimum quantity and
+        minimum notional limits.
+        Returns (valid_contracts, None) or (0.0, error_reason).
+        """
+        rules = self.get_symbol_rules(symbol)
+        step = rules.step_size
+        prec = rules.qty_precision
+
+        if raw_qty <= 0:
+            return 0.0, f"{symbol} calculated raw quantity is non-positive ({raw_qty})"
+
+        # Floor by step size to prevent over-allocation of margin
+        steps = math.floor((raw_qty + 1e-12) / step)
+        rounded_qty = round(steps * step, prec)
+        if prec == 0:
+            rounded_qty = float(int(rounded_qty))
+
+        if rounded_qty < rules.min_qty:
+            return 0.0, (
+                f"{symbol} floored qty {rounded_qty} is below exchange minQty {rules.min_qty} "
+                f"(raw: {raw_qty:.6f})"
+            )
+
+        notional = rounded_qty * price
+        min_notional = max(rules.min_notional, self.min_order_notional)
+        if notional < min_notional:
+            return 0.0, (
+                f"{symbol} order notional ${notional:.2f} is below minNotional ${min_notional:.2f} "
+                f"(qty: {rounded_qty}, price: ${price:,.2f})"
+            )
+
+        return rounded_qty, None
+
+    def update_exchange_info(self) -> bool:
+        """
+        Attempts to fetch live exchange filters from Binance Futures API to update
+        step sizes, minimum quantities, and minimum notionals dynamically.
+        Falls back cleanly to hardcoded constants if network is unavailable.
+        """
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        try:
+            resp = requests.get(url, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                for s in data.get("symbols", []):
+                    sym = s.get("symbol")
+                    if sym in self.symbol_rules or sym in (self.asset_a, self.asset_b):
+                        step_size = None
+                        min_qty = None
+                        min_notional = self.min_order_notional
+                        qty_precision = int(s.get("quantityPrecision", 3))
+                        price_precision = int(s.get("pricePrecision", 2))
+                        for f in s.get("filters", []):
+                            ftype = f.get("filterType")
+                            if ftype == "LOT_SIZE":
+                                step_size = float(f.get("stepSize", 0.001))
+                                min_qty = float(f.get("minQty", 0.001))
+                            elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
+                                notional_val = f.get("notional") or f.get("minNotional")
+                                if notional_val:
+                                    min_notional = float(notional_val)
+                        if step_size is not None and min_qty is not None:
+                            self.symbol_rules[sym] = SymbolRules(
+                                step_size=step_size,
+                                min_qty=min_qty,
+                                min_notional=min_notional,
+                                qty_precision=qty_precision,
+                                price_precision=price_precision
+                            )
+                logger.info("Successfully refreshed Binance Futures exchange rules from API.")
+                return True
+        except Exception as e:
+            logger.debug(f"Could not fetch live Binance exchange rules (using defaults): {e}")
+        return False
+
+    def _open_spread_position(self, target_state: int, price_a: float, price_b: float, timestamp_str: str) -> bool:
+        """
+        Sizes and fills both legs for spread entry, enforcing exchange lot step size
+        and minimum notional constraints. Returns True if successfully opened, False if rejected.
+        """
         gross_budget = self.account.cash_balance * self.allocation_pct
         notional_a_target = gross_budget / (1.0 + abs(self.beta))
         notional_b_target = (abs(self.beta) * gross_budget) / (1.0 + abs(self.beta))
 
-        contracts_a = notional_a_target / price_a
-        contracts_b = notional_b_target / price_b
+        raw_contracts_a = notional_a_target / price_a
+        raw_contracts_b = notional_b_target / price_b
+
+        contracts_a, err_a = self.round_lot_size(self.asset_a, raw_contracts_a, price_a)
+        contracts_b, err_b = self.round_lot_size(self.asset_b, raw_contracts_b, price_b)
+
+        if err_a or err_b or contracts_a <= 0 or contracts_b <= 0:
+            logger.warning(
+                f"[{timestamp_str}] Order rejected by exchange lot filters: "
+                f"{self.asset_a}: {err_a or 'OK'} | {self.asset_b}: {err_b or 'OK'}"
+            )
+            return False
 
         side_a = "BUY" if target_state == 1 else "SELL"
         side_b = "SELL" if target_state == 1 else "BUY"
@@ -535,8 +679,9 @@ class PaperTradingEngine:
             "entry_fees": fill_a["fee"] + fill_b["fee"]
         }
         logger.info(f"[{timestamp_str}] OPENED {('LONG' if target_state==1 else 'SHORT')} SPREAD | "
-                    f"{self.asset_a}: {side_a} {contracts_a:.4f} @ ${fill_a['fill_price']:,.2f} | "
-                    f"{self.asset_b}: {side_b} {contracts_b:.4f} @ ${fill_b['fill_price']:,.2f}")
+                    f"{self.asset_a}: {side_a} {contracts_a} @ ${fill_a['fill_price']:,.2f} | "
+                    f"{self.asset_b}: {side_b} {contracts_b} @ ${fill_b['fill_price']:,.2f}")
+        return True
 
     def _close_spread_position(self, price_a: float, price_b: float, timestamp_str: str, reason: str):
         """Liquidates both legs for spread exit and records trade PnL."""

@@ -86,6 +86,7 @@ class TradingConfig:
     taker_fee_pct: float = 0.0005  # 0.05% per leg per transaction
     slippage_pct: float = 0.0002   # 0.02% per leg per transaction
     default_funding_rate_8h: float = 0.0001  # 0.01% baseline 8-hour funding rate
+    min_order_notional: float = 5.0  # Binance USDT-M Futures minimum notional $5.00
 
 
 @dataclass(frozen=True)
