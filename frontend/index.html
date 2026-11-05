@@ -715,6 +715,24 @@
                     <span className="text-white font-medium">$1,000.00 (10% allocation)</span>
                   </div>
                   <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Futures Leverage</span>
+                    <span className="text-slate-200 font-medium">{status.leverage || 1.0}x Cross/Isolated</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Locked Initial Margin</span>
+                    <span className="text-amber-400 font-medium">${(Number(status.initial_margin_locked) || 0).toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Available Free Margin</span>
+                    <span className="text-emerald-400 font-medium">${(Number(status.free_margin) || Number(status.cash_balance) || 10000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
+                    <span className="text-slate-400">Margin Ratio (Liq Risk)</span>
+                    <span className={`font-bold ${Number(status.margin_ratio) >= 0.8 ? "text-rose-400" : Number(status.margin_ratio) >= 0.5 ? "text-amber-400" : "text-emerald-400"}`}>
+                      {(Number(status.margin_ratio) * 100).toFixed(1)}% {Number(status.margin_ratio) >= 1.0 ? "⚠️ LIQUIDATION" : "Safe"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-2 border-b border-slate-800/80">
                     <span className="text-slate-400">Execution Slippage</span>
                     <span className="text-slate-300 font-medium">0.02% Taker Fill</span>
                   </div>

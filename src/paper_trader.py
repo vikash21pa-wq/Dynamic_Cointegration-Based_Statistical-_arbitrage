@@ -83,23 +83,82 @@ BINANCE_FUTURES_RULES: Dict[str, SymbolRules] = {
 class PaperAccount:
     """
     Virtual margin account tracking balances, margin requirements,
-    open positions, and trade history.
+    open positions, leverage, and trade history with liquidation risk monitoring.
     """
 
     def __init__(
         self,
         initial_balance: float = 10000.0,
         fee_pct: float = trading_config.taker_fee_pct,
-        slippage_pct: float = trading_config.slippage_pct
+        slippage_pct: float = trading_config.slippage_pct,
+        leverage: float = trading_config.leverage,
+        maintenance_margin_pct: Optional[float] = None
     ):
         self.initial_balance = initial_balance
         self.cash_balance = initial_balance
         self.fee_pct = fee_pct
         self.slippage_pct = slippage_pct
+        self.leverage = max(1.0, float(leverage))
+        if maintenance_margin_pct is not None:
+            self.maintenance_margin_pct = float(maintenance_margin_pct)
+        else:
+            self.maintenance_margin_pct = getattr(trading_config, "maintenance_margin_pct", 0.05)
         self.positions: Dict[str, Position] = {}
         self.closed_trades: List[Dict[str, Any]] = []
         self.total_fees_paid: float = 0.0
         self.realized_pnl: float = 0.0
+
+    @property
+    def initial_margin_locked(self) -> float:
+        """
+        Total initial margin locked to support open positions.
+        At leverage L, initial margin locked is (1 / L) of total position notional.
+        For example, at 5x leverage, 20% margin is locked.
+        """
+        if not self.positions:
+            return 0.0
+        return sum(pos.notional / self.leverage for pos in self.positions.values())
+
+    @property
+    def free_margin(self) -> float:
+        """Available unencumbered cash balance for new position margin."""
+        return max(0.0, self.cash_balance - self.initial_margin_locked)
+
+    def get_maintenance_margin(self, current_prices: Optional[Dict[str, float]] = None) -> float:
+        """
+        Calculates maintenance margin threshold to maintain open positions.
+        Uses mark-to-market notional if current prices are supplied, otherwise entry notional.
+        """
+        if not self.positions:
+            return 0.0
+        mm = 0.0
+        for sym, pos in self.positions.items():
+            if current_prices and sym in current_prices:
+                notional = pos.contracts * current_prices[sym]
+            else:
+                notional = pos.notional
+            mm += notional * self.maintenance_margin_pct
+        return mm
+
+    def get_margin_ratio(self, current_prices: Dict[str, float]) -> float:
+        """
+        Binance Futures Margin Ratio = maintenance_margin / total_equity.
+        Forced liquidation is triggered when margin_ratio >= 1.0 (or total_equity < maintenance_margin).
+        """
+        equity = self.get_total_equity(current_prices)
+        if equity <= 0.0:
+            return float("inf")
+        return self.get_maintenance_margin(current_prices) / equity
+
+    def is_liquidatable(self, current_prices: Dict[str, float]) -> bool:
+        """
+        Returns True if open positions exist and total equity has fallen below maintenance margin.
+        """
+        if not self.positions:
+            return False
+        total_equity = self.get_total_equity(current_prices)
+        maintenance_margin = self.get_maintenance_margin(current_prices)
+        return total_equity < maintenance_margin
 
     def get_unrealized_pnl(self, current_prices: Dict[str, float]) -> float:
         """Calculates mark-to-market unrealized PnL across all open legs."""
@@ -169,7 +228,9 @@ class PaperTradingEngine:
         alpha: Optional[float] = None,
         beta: Optional[float] = None,
         results_dir: Path = RESULTS_DIR,
-        recover_state: bool = True
+        recover_state: bool = True,
+        leverage: float = trading_config.leverage,
+        maintenance_margin_pct: Optional[float] = None
     ):
         parts = pair.replace("-", "/").split("/")
         self.asset_a = parts[0].upper()
@@ -187,7 +248,13 @@ class PaperTradingEngine:
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        self.account = PaperAccount(initial_balance=initial_capital)
+        self.account = PaperAccount(
+            initial_balance=initial_capital,
+            leverage=leverage,
+            maintenance_margin_pct=maintenance_margin_pct
+        )
+        self.leverage = self.account.leverage
+        self.last_rejection_reason: Optional[str] = None
         self.spread_history: List[float] = []
         self.current_position_state: int = 0  # 0: Flat, +1: Long spread, -1: Short spread
         self.bars_in_trade: int = 0
@@ -420,11 +487,23 @@ class PaperTradingEngine:
         current_spread = float(np.log(price_a) - self.alpha - self.beta * np.log(price_b))
         zscore = float((current_spread - self.rolling_mean) / self.rolling_std)
 
-        # --- 3. State Machine Logic ---
+        # --- 3. State Machine Logic & Margin Liquidation Check ---
         action_taken = "HOLD"
         reason = ""
 
-        if self.current_position_state == 0:
+        # Priority 1: Check Forced Liquidation if positions are open
+        if self.account.positions and self.account.is_liquidatable(current_prices):
+            total_equity = self.account.get_total_equity(current_prices)
+            mm = self.account.get_maintenance_margin(current_prices)
+            mr = self.account.get_margin_ratio(current_prices)
+            liq_reason = (
+                f"Forced Liquidation: Total equity ${total_equity:,.2f} < "
+                f"Maintenance margin ${mm:,.2f} (Margin ratio: {mr*100:.1f}%)"
+            )
+            self._close_spread_position(price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str, reason=liq_reason)
+            action_taken = "LIQUIDATION"
+            reason = liq_reason
+        elif self.current_position_state == 0:
             # Check entry conditions
             if zscore <= -self.entry_threshold:
                 # Undervalued spread -> Long spread (Buy A, Sell B)
@@ -434,7 +513,7 @@ class PaperTradingEngine:
                     reason = f"Z-score {zscore:.2f} <= -{self.entry_threshold}"
                 else:
                     action_taken = "REJECTED_ORDER"
-                    reason = "Exchange lot size / minimum notional check failed"
+                    reason = self.last_rejection_reason or "Exchange lot size / minimum notional check failed"
             elif zscore >= self.entry_threshold:
                 # Overvalued spread -> Short spread (Sell A, Buy B)
                 success = self._open_spread_position(target_state=-1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
@@ -443,7 +522,7 @@ class PaperTradingEngine:
                     reason = f"Z-score {zscore:.2f} >= +{self.entry_threshold}"
                 else:
                     action_taken = "REJECTED_ORDER"
-                    reason = "Exchange lot size / minimum notional check failed"
+                    reason = self.last_rejection_reason or "Exchange lot size / minimum notional check failed"
         else:
             # Check exit conditions
             should_exit = False
@@ -475,6 +554,13 @@ class PaperTradingEngine:
         total_pnl = total_equity - self.account.initial_balance
         pnl_pct = (total_pnl / self.account.initial_balance) * 100.0
         candle_progress = round((bar_elapsed_seconds / self.candle_seconds) * 100.0, 1)
+
+        # Margin Risk Metrics
+        init_margin_locked = self.account.initial_margin_locked
+        maint_margin = self.account.get_maintenance_margin(current_prices)
+        free_margin = self.account.free_margin
+        raw_margin_ratio = self.account.get_margin_ratio(current_prices) if self.account.positions else 0.0
+        margin_ratio_val = 999.9 if raw_margin_ratio == float("inf") else round(raw_margin_ratio, 4)
 
         # Serialize active positions
         positions_dict = {
@@ -509,6 +595,12 @@ class PaperTradingEngine:
             "pnl_pct": pnl_pct,
             "total_trades": len(self.account.closed_trades),
             "fees_paid": self.account.total_fees_paid,
+            # Margin & Liquidation Risk Telemetry
+            "leverage": self.account.leverage,
+            "initial_margin_locked": round(init_margin_locked, 2),
+            "maintenance_margin": round(maint_margin, 2),
+            "free_margin": round(free_margin, 2),
+            "margin_ratio": margin_ratio_val,
             # Position & Trade Lifecycle State
             "positions": positions_dict,
             "current_trade_meta": self.current_trade_meta,
@@ -624,9 +716,16 @@ class PaperTradingEngine:
 
     def _open_spread_position(self, target_state: int, price_a: float, price_b: float, timestamp_str: str) -> bool:
         """
-        Sizes and fills both legs for spread entry, enforcing exchange lot step size
-        and minimum notional constraints. Returns True if successfully opened, False if rejected.
+        Sizes and fills both legs for spread entry, enforcing exchange lot step size,
+        minimum notional constraints, and initial margin locking against free margin.
+        Returns True if successfully opened, False if rejected.
         """
+        available_margin = self.account.free_margin
+        if available_margin <= 0:
+            self.last_rejection_reason = "Insufficient free margin (free margin is $0.00)"
+            logger.warning(f"[{timestamp_str}] Order rejected: {self.last_rejection_reason}")
+            return False
+
         gross_budget = self.account.cash_balance * self.allocation_pct
         notional_a_target = gross_budget / (1.0 + abs(self.beta))
         notional_b_target = (abs(self.beta) * gross_budget) / (1.0 + abs(self.beta))
@@ -638,10 +737,24 @@ class PaperTradingEngine:
         contracts_b, err_b = self.round_lot_size(self.asset_b, raw_contracts_b, price_b)
 
         if err_a or err_b or contracts_a <= 0 or contracts_b <= 0:
-            logger.warning(
-                f"[{timestamp_str}] Order rejected by exchange lot filters: "
+            self.last_rejection_reason = (
+                f"Exchange lot size / minimum notional check failed: "
                 f"{self.asset_a}: {err_a or 'OK'} | {self.asset_b}: {err_b or 'OK'}"
             )
+            logger.warning(f"[{timestamp_str}] Order rejected by exchange lot filters: {self.last_rejection_reason}")
+            return False
+
+        # Margin requirement check: verify required initial margin <= free margin
+        est_notional_a = contracts_a * price_a
+        est_notional_b = contracts_b * price_b
+        total_req_margin = (est_notional_a + est_notional_b) / self.account.leverage
+
+        if total_req_margin > available_margin:
+            self.last_rejection_reason = (
+                f"Insufficient margin: Required initial margin ${total_req_margin:.2f} > "
+                f"Available free margin ${available_margin:.2f}"
+            )
+            logger.warning(f"[{timestamp_str}] Order rejected: {self.last_rejection_reason}")
             return False
 
         side_a = "BUY" if target_state == 1 else "SELL"
@@ -676,11 +789,13 @@ class PaperTradingEngine:
             "entry_price_b": fill_b["fill_price"],
             "contracts_a": contracts_a,
             "contracts_b": contracts_b,
-            "entry_fees": fill_a["fee"] + fill_b["fee"]
+            "entry_fees": fill_a["fee"] + fill_b["fee"],
+            "initial_margin_locked": (fill_a["notional"] + fill_b["notional"]) / self.account.leverage
         }
         logger.info(f"[{timestamp_str}] OPENED {('LONG' if target_state==1 else 'SHORT')} SPREAD | "
                     f"{self.asset_a}: {side_a} {contracts_a} @ ${fill_a['fill_price']:,.2f} | "
-                    f"{self.asset_b}: {side_b} {contracts_b} @ ${fill_b['fill_price']:,.2f}")
+                    f"{self.asset_b}: {side_b} {contracts_b} @ ${fill_b['fill_price']:,.2f} | "
+                    f"Margin Locked: ${self.account.initial_margin_locked:,.2f} ({self.account.leverage:.0f}x)")
         return True
 
     def _close_spread_position(self, price_a: float, price_b: float, timestamp_str: str, reason: str):
@@ -796,6 +911,9 @@ class PaperTradingEngine:
                 self.account.realized_pnl = float(data["realized_pnl"])
             if "fees_paid" in data:
                 self.account.total_fees_paid = float(data["fees_paid"])
+            if "leverage" in data:
+                self.account.leverage = float(data["leverage"])
+                self.leverage = self.account.leverage
             if "position_state" in data:
                 self.current_position_state = int(data["position_state"])
             if "bars_in_trade" in data:

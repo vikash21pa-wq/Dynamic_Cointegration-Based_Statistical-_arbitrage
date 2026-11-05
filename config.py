@@ -71,6 +71,7 @@ class TradingConfig:
     # Capital and leverage
     initial_capital: float = 10000.0
     leverage: float = 1.0
+    maintenance_margin_pct: float = 0.05  # 5% maintenance margin rate for perpetual futures
     max_active_pairs: int = 5
     pair_gross_allocation: float = 0.10  # 10% of portfolio equity per active pair
     max_portfolio_drawdown: float = 0.10  # 10% portfolio drawdown circuit breaker
