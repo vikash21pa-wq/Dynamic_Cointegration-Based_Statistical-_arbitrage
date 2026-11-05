@@ -106,7 +106,49 @@ class PaperAccount:
         self.positions: Dict[str, Position] = {}
         self.closed_trades: List[Dict[str, Any]] = []
         self.total_fees_paid: float = 0.0
+        self.total_funding_paid: float = 0.0
+        self.funding_history: List[Dict[str, Any]] = []
         self.realized_pnl: float = 0.0
+
+    def apply_funding_payment(
+        self,
+        symbol: str,
+        side: str,
+        contracts: float,
+        mark_price: float,
+        funding_rate: float,
+        timestamp_str: str
+    ) -> Dict[str, Any]:
+        """
+        Settles 8-hour perpetual funding payment:
+            Funding payment = contracts * mark_price * funding_rate
+        Long positions pay positive funding (cash deduction); short positions receive positive funding.
+        Negative funding rate flips the cashflow direction.
+        """
+        notional = contracts * mark_price
+        gross_payment = notional * funding_rate
+
+        # Long pays positive funding (+funding_rate -> negative cash delta)
+        # Short receives positive funding (+funding_rate -> positive cash delta)
+        cash_change = -gross_payment if side == "LONG" else gross_payment
+
+        self.cash_balance += cash_change
+        self.total_funding_paid -= cash_change  # Cumulative net funding cost
+
+        record = {
+            "timestamp": timestamp_str,
+            "symbol": symbol,
+            "side": side,
+            "contracts": contracts,
+            "mark_price": mark_price,
+            "notional": notional,
+            "funding_rate": funding_rate,
+            "payment": gross_payment,
+            "cash_change": cash_change,
+            "account_cash": self.cash_balance
+        }
+        self.funding_history.append(record)
+        return record
 
     @property
     def initial_margin_locked(self) -> float:
@@ -255,6 +297,7 @@ class PaperTradingEngine:
         )
         self.leverage = self.account.leverage
         self.last_rejection_reason: Optional[str] = None
+        self.last_funding_period_id: Optional[int] = None
         self.spread_history: List[float] = []
         self.current_position_state: int = 0  # 0: Flat, +1: Long spread, -1: Short spread
         self.bars_in_trade: int = 0
@@ -396,6 +439,74 @@ class PaperTradingEngine:
 
         return prices.get(self.asset_a), prices.get(self.asset_b)
 
+    def fetch_live_funding_rates(self) -> Dict[str, float]:
+        """
+        Fetches current 8-hour perpetual funding rates from Binance Futures API.
+        Falls back to trading_config.default_funding_rate_8h (0.0001 = 0.01%) if network is unavailable.
+        """
+        rates = {
+            self.asset_a: trading_config.default_funding_rate_8h,
+            self.asset_b: trading_config.default_funding_rate_8h
+        }
+        for sym in (self.asset_a, self.asset_b):
+            try:
+                url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+                resp = requests.get(url, params={"symbol": sym}, timeout=2.5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    val = data.get("lastFundingRate")
+                    if val is not None:
+                        rates[sym] = float(val)
+                        continue
+            except Exception:
+                pass
+
+            try:
+                url = "https://fapi.binance.com/fapi/v1/fundingRate"
+                resp = requests.get(url, params={"symbol": sym, "limit": 1}, timeout=2.5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data and isinstance(data, list) and "fundingRate" in data[-1]:
+                        rates[sym] = float(data[-1]["fundingRate"])
+            except Exception:
+                pass
+
+        return rates
+
+    def settle_funding_fees(
+        self,
+        current_prices: Dict[str, float],
+        timestamp_str: str,
+        funding_rates: Optional[Dict[str, float]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Settles 8-hour perpetual funding payments across all active positions.
+        """
+        if not self.account.positions:
+            return []
+        if funding_rates is None:
+            funding_rates = self.fetch_live_funding_rates()
+
+        settlements = []
+        for sym, pos in list(self.account.positions.items()):
+            mark_price = current_prices.get(sym, pos.entry_price)
+            fr = funding_rates.get(sym, trading_config.default_funding_rate_8h)
+            payment_info = self.account.apply_funding_payment(
+                symbol=sym,
+                side=pos.side,
+                contracts=pos.contracts,
+                mark_price=mark_price,
+                funding_rate=fr,
+                timestamp_str=timestamp_str
+            )
+            settlements.append(payment_info)
+            logger.info(
+                f"[{timestamp_str}] 8-HOUR FUNDING SETTLED | {sym} ({pos.side}): "
+                f"Rate={fr*100:.4f}% | Notional=${payment_info['notional']:,.2f} | "
+                f"Cash Delta=${payment_info['cash_change']:+,.4f} | Cash Balance=${self.account.cash_balance:,.2f}"
+            )
+        return settlements
+
     def process_tick(
         self,
         price_a: float,
@@ -405,7 +516,8 @@ class PaperTradingEngine:
         """
         Ingests a new market price tick for Asset A & Asset B.
         Accumulates ticks into 5-minute candles to preserve statistical baseline integrity,
-        calculates mark-to-market Z-score, updates state machine, and executes paper orders.
+        settles periodic 8-hour perpetual funding payments, calculates mark-to-market Z-score,
+        updates state machine, and executes paper orders.
         """
         dt = self._parse_timestamp(timestamp_str)
         canonical_ts_str = dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -415,6 +527,21 @@ class PaperTradingEngine:
         bar_elapsed_seconds = int(dt.timestamp()) % self.candle_seconds
 
         candle_closed = False
+
+        # --- 0. 8-Hour Perpetual Funding Rate Settlement (00:00, 08:00, 16:00 UTC) ---
+        ts_sec = int(dt.timestamp())
+        funding_period_id = ts_sec // (8 * 3600)  # 28,800 seconds per 8-hour window
+        funding_settled = False
+        funding_settlements = []
+
+        if self.last_funding_period_id is None:
+            self.last_funding_period_id = funding_period_id
+        elif funding_period_id > self.last_funding_period_id:
+            # 8-Hour boundary crossed: settle funding for open positions
+            if self.account.positions:
+                funding_settlements = self.settle_funding_fees(current_prices, canonical_ts_str)
+                funding_settled = bool(funding_settlements)
+            self.last_funding_period_id = funding_period_id
 
         # --- 1. 5-Minute Candle Accumulator (Kline Builder) ---
         if self.current_bar_id is None:
@@ -548,6 +675,11 @@ class PaperTradingEngine:
                 action_taken = "CLOSE_SPREAD"
                 reason = exit_reason
 
+        # If funding was settled and no position trade action occurred on this tick, reflect in action telemetry
+        if funding_settled and action_taken == "HOLD":
+            action_taken = "FUNDING_SETTLED"
+            reason = f"8-Hour Perpetual funding settled for {len(funding_settlements)} open position leg(s)"
+
         # --- 4. Portfolio Metrics & Live Snapshot ---
         unrealized = self.account.get_unrealized_pnl(current_prices)
         total_equity = self.account.get_total_equity(current_prices)
@@ -601,6 +733,10 @@ class PaperTradingEngine:
             "maintenance_margin": round(maint_margin, 2),
             "free_margin": round(free_margin, 2),
             "margin_ratio": margin_ratio_val,
+            # Perpetual Funding Telemetry
+            "total_funding_paid": round(self.account.total_funding_paid, 4),
+            "last_funding_period_id": self.last_funding_period_id,
+            "funding_settled": funding_settled,
             # Position & Trade Lifecycle State
             "positions": positions_dict,
             "current_trade_meta": self.current_trade_meta,
@@ -858,6 +994,10 @@ class PaperTradingEngine:
             trades_df = pd.DataFrame(self.account.closed_trades)
             trades_df.to_csv(self.results_dir / "paper_trades.csv", index=False)
 
+        if self.account.funding_history:
+            funding_df = pd.DataFrame(self.account.funding_history)
+            funding_df.to_csv(self.results_dir / "paper_funding.csv", index=False)
+
     def _recover_state_from_disk(self) -> bool:
         """
         Re-hydrates portfolio state from disk upon engine startup or server reboot.
@@ -865,16 +1005,19 @@ class PaperTradingEngine:
           - account.cash_balance
           - account.realized_pnl
           - account.total_fees_paid
+          - account.total_funding_paid
           - account.positions (reconstructed Position dataclasses)
           - current_position_state (+1, -1, 0)
           - bars_in_trade
           - current_trade_meta
           - account.closed_trades (loaded from paper_trades.csv)
+          - account.funding_history (loaded from paper_funding.csv)
         Returns:
           True if state was successfully recovered from disk, False otherwise.
         """
         state_file = self.results_dir / "paper_trading_state.json"
         trades_file = self.results_dir / "paper_trades.csv"
+        funding_file = self.results_dir / "paper_funding.csv"
 
         # 1. Recover completed trades ledger if available
         if trades_file.exists():
@@ -885,6 +1028,16 @@ class PaperTradingEngine:
                     logger.info(f"Loaded {len(self.account.closed_trades)} historical trades from {trades_file}")
             except Exception as e:
                 logger.warning(f"Could not load historical trades from {trades_file}: {e}")
+
+        # 1b. Recover historical funding records if available
+        if funding_file.exists():
+            try:
+                funding_df = pd.read_csv(funding_file)
+                if not funding_df.empty:
+                    self.account.funding_history = funding_df.to_dict(orient="records")
+                    logger.info(f"Loaded {len(self.account.funding_history)} historical funding records from {funding_file}")
+            except Exception as e:
+                logger.warning(f"Could not load historical funding records from {funding_file}: {e}")
 
         # 2. Recover live state snapshot if available
         if not state_file.exists():
@@ -911,6 +1064,10 @@ class PaperTradingEngine:
                 self.account.realized_pnl = float(data["realized_pnl"])
             if "fees_paid" in data:
                 self.account.total_fees_paid = float(data["fees_paid"])
+            if "total_funding_paid" in data:
+                self.account.total_funding_paid = float(data["total_funding_paid"])
+            if "last_funding_period_id" in data and data["last_funding_period_id"] is not None:
+                self.last_funding_period_id = int(data["last_funding_period_id"])
             if "leverage" in data:
                 self.account.leverage = float(data["leverage"])
                 self.leverage = self.account.leverage
