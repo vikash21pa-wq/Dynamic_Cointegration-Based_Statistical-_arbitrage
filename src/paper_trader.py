@@ -1,7 +1,8 @@
 """
 Real-Time Paper Trading Engine for Cryptocurrency Statistical Arbitrage.
 Manages virtual portfolio, order execution simulation with fees/slippage,
-real-time spread Z-score state machine, and ledger persistence.
+5-minute candle accumulator (Kline builder), real-time spread Z-score state machine,
+and ledger persistence.
 """
 
 import json
@@ -19,6 +20,7 @@ import requests
 from config import (
     paper_config,
     trading_config,
+    market_config,
     PROCESSED_DATA_DIR,
     RESULTS_DIR
 )
@@ -34,6 +36,23 @@ class Position:
     entry_price: float
     notional: float
     entry_time: str
+
+
+@dataclass
+class CandleBar:
+    bar_id: int
+    start_time: str
+    close_time: str
+    open_a: float
+    high_a: float
+    low_a: float
+    close_a: float
+    open_b: float
+    high_b: float
+    low_b: float
+    close_b: float
+    ticks: int
+    close_spread: float
 
 
 class PaperAccount:
@@ -108,7 +127,8 @@ class PaperAccount:
 class PaperTradingEngine:
     """
     Automated pairs statistical arbitrage paper trading bot.
-    Operates an online state machine using Engle-Granger / OLS spread parameters.
+    Operates a 5-minute candle accumulator (Kline builder) and online state machine
+    using Engle-Granger / OLS spread parameters.
     """
 
     def __init__(
@@ -120,6 +140,7 @@ class PaperTradingEngine:
         entry_threshold: float = trading_config.zscore_entry,
         exit_threshold: float = trading_config.zscore_exit,
         emergency_threshold: float = trading_config.zscore_emergency_stop,
+        candle_minutes: int = market_config.candle_minutes,
         alpha: Optional[float] = None,
         beta: Optional[float] = None,
         results_dir: Path = RESULTS_DIR
@@ -133,6 +154,8 @@ class PaperTradingEngine:
         self.entry_threshold = entry_threshold
         self.exit_threshold = exit_threshold
         self.emergency_threshold = emergency_threshold
+        self.candle_minutes = candle_minutes
+        self.candle_seconds = candle_minutes * 60
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,6 +164,15 @@ class PaperTradingEngine:
         self.current_position_state: int = 0  # 0: Flat, +1: Long spread, -1: Short spread
         self.bars_in_trade: int = 0
         self.current_trade_meta: Optional[Dict[str, Any]] = None
+
+        # 5-Minute Candle Accumulator state
+        self.current_bar_id: Optional[int] = None
+        self.current_candle: Optional[Dict[str, Any]] = None
+        self.last_completed_candle: Optional[CandleBar] = None
+
+        # Stable rolling statistical baseline (anchored to 30 5m bars = 2.5 hours)
+        self.rolling_mean: float = 0.0
+        self.rolling_std: float = 0.005
 
         # Load calibrated parameters from summary if not specified
         if alpha is None or beta is None:
@@ -151,6 +183,45 @@ class PaperTradingEngine:
 
         # Warm up spread history with recent aligned matrix if present
         self._warmup_spread_history()
+        self._update_rolling_statistics()
+
+    @staticmethod
+    def _parse_timestamp(ts_str: Optional[str]) -> datetime:
+        """Parses arbitrary timestamp string into timezone-aware UTC datetime."""
+        if ts_str is None:
+            return datetime.now(timezone.utc)
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d"
+        ):
+            try:
+                clean_str = ts_str.replace("+00:00", "+0000").replace("Z", "+0000")
+                dt = datetime.strptime(clean_str, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except ValueError:
+                pass
+        return datetime.now(timezone.utc)
+
+    def _update_rolling_statistics(self):
+        """
+        Computes reference mean and std from completed historical 5m bars.
+        Preserves the 2.5-hour equilibrium baseline regardless of high-frequency polling.
+        """
+        if len(self.spread_history) >= 2:
+            arr = np.array(self.spread_history)
+            self.rolling_mean = float(np.mean(arr))
+            self.rolling_std = max(float(np.std(arr)), 1e-6)
+        elif len(self.spread_history) == 1:
+            self.rolling_mean = float(self.spread_history[0])
+            self.rolling_std = 0.005
+        else:
+            self.rolling_mean = 0.0
+            self.rolling_std = 0.005
 
     def _load_calibrated_parameters(self) -> Tuple[float, float]:
         """Loads static cointegration alpha and beta from previous screening."""
@@ -175,7 +246,7 @@ class PaperTradingEngine:
         return 1.4648, 1.1678
 
     def _warmup_spread_history(self):
-        """Initializes rolling spread buffer with the most recent bars."""
+        """Initializes rolling spread buffer with the most recent completed 5-minute bars."""
         aligned_path = PROCESSED_DATA_DIR / "aligned_close_prices.csv"
         if aligned_path.exists():
             try:
@@ -185,7 +256,8 @@ class PaperTradingEngine:
                     p_b = df[self.asset_b].values[-self.zscore_window:]
                     spreads = np.log(p_a) - self.alpha - self.beta * np.log(p_b)
                     self.spread_history = list(spreads)
-                    logger.info(f"Warmed up spread buffer with {len(self.spread_history)} historical bars.")
+                    self._update_rolling_statistics()
+                    logger.info(f"Warmed up spread buffer with {len(self.spread_history)} historical 5m bars. Baseline Mean={self.rolling_mean:.6f}, Std={self.rolling_std:.6f}")
             except Exception as e:
                 logger.warning(f"Could not warm up spread history: {e}")
 
@@ -193,17 +265,33 @@ class PaperTradingEngine:
         """
         Fetches current market mid-prices for Asset A and Asset B from Binance.
         Uses public REST ticker endpoints (no authentication required).
+        Fetches all tickers in a single batch roundtrip to eliminate inter-leg latency skew.
         """
         url = "https://fapi.binance.com/fapi/v1/ticker/bookTicker"
+        try:
+            resp = requests.get(url, timeout=3.5)
+            if resp.status_code == 200:
+                tickers = resp.json()
+                price_map = {}
+                for item in tickers:
+                    sym = item.get("symbol")
+                    if sym in (self.asset_a, self.asset_b):
+                        bid = float(item["bidPrice"])
+                        ask = float(item["askPrice"])
+                        price_map[sym] = (bid + ask) / 2.0
+                if self.asset_a in price_map and self.asset_b in price_map:
+                    return price_map[self.asset_a], price_map[self.asset_b]
+        except Exception:
+            pass
+
+        # Fallback to individual requests if batch fails
         prices = {}
         for sym in [self.asset_a, self.asset_b]:
             try:
-                resp = requests.get(url, params={"symbol": sym}, timeout=3)
+                resp = requests.get(url, params={"symbol": sym}, timeout=2.5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    bid = float(data["bidPrice"])
-                    ask = float(data["askPrice"])
-                    prices[sym] = (bid + ask) / 2.0
+                    prices[sym] = (float(data["bidPrice"]) + float(data["askPrice"])) / 2.0
             except Exception:
                 pass
 
@@ -216,45 +304,108 @@ class PaperTradingEngine:
         timestamp_str: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Ingests a new market price tick for Asset A & Asset B,
-        calculates Z-score, updates state machine, and executes paper orders.
+        Ingests a new market price tick for Asset A & Asset B.
+        Accumulates ticks into 5-minute candles to preserve statistical baseline integrity,
+        calculates mark-to-market Z-score, updates state machine, and executes paper orders.
         """
-        if timestamp_str is None:
-            timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        dt = self._parse_timestamp(timestamp_str)
+        canonical_ts_str = dt.strftime("%Y-%m-%d %H:%M:%S")
 
         current_prices = {self.asset_a: price_a, self.asset_b: price_b}
+        bar_id = int(dt.timestamp()) // self.candle_seconds
+        bar_elapsed_seconds = int(dt.timestamp()) % self.candle_seconds
 
-        # 1. Compute spread
+        candle_closed = False
+
+        # --- 1. 5-Minute Candle Accumulator (Kline Builder) ---
+        if self.current_bar_id is None:
+            # First tick initialization
+            self.current_bar_id = bar_id
+            self.current_candle = {
+                "bar_id": bar_id,
+                "start_time": canonical_ts_str,
+                "open_a": price_a, "high_a": price_a, "low_a": price_a, "close_a": price_a,
+                "open_b": price_b, "high_b": price_b, "low_b": price_b, "close_b": price_b,
+                "ticks": 1
+            }
+        elif bar_id > self.current_bar_id:
+            # PREVIOUS 5-MINUTE CANDLE HAS COMPLETED!
+            completed_close_a = self.current_candle["close_a"]
+            completed_close_b = self.current_candle["close_b"]
+            completed_spread = float(np.log(completed_close_a) - self.alpha - self.beta * np.log(completed_close_b))
+
+            self.last_completed_candle = CandleBar(
+                bar_id=self.current_bar_id,
+                start_time=self.current_candle["start_time"],
+                close_time=canonical_ts_str,
+                open_a=self.current_candle["open_a"],
+                high_a=self.current_candle["high_a"],
+                low_a=self.current_candle["low_a"],
+                close_a=completed_close_a,
+                open_b=self.current_candle["open_b"],
+                high_b=self.current_candle["high_b"],
+                low_b=self.current_candle["low_b"],
+                close_b=completed_close_b,
+                ticks=self.current_candle["ticks"],
+                close_spread=completed_spread
+            )
+
+            # Append completed 5m bar spread into rolling buffer
+            self.spread_history.append(completed_spread)
+            if len(self.spread_history) > self.zscore_window:
+                self.spread_history.pop(0)
+
+            # Recompute 2.5-hour equilibrium baseline
+            self._update_rolling_statistics()
+
+            # Increment bars_in_trade once per completed 5m candle
+            if self.current_position_state != 0:
+                self.bars_in_trade += 1
+
+            candle_closed = True
+
+            # Reset accumulator for the new 5m candle
+            self.current_bar_id = bar_id
+            self.current_candle = {
+                "bar_id": bar_id,
+                "start_time": canonical_ts_str,
+                "open_a": price_a, "high_a": price_a, "low_a": price_a, "close_a": price_a,
+                "open_b": price_b, "high_b": price_b, "low_b": price_b, "close_b": price_b,
+                "ticks": 1
+            }
+        else:
+            # Intra-candle tick: update High, Low, Close and tick counter
+            self.current_candle["high_a"] = max(self.current_candle["high_a"], price_a)
+            self.current_candle["low_a"] = min(self.current_candle["low_a"], price_a)
+            self.current_candle["close_a"] = price_a
+
+            self.current_candle["high_b"] = max(self.current_candle["high_b"], price_b)
+            self.current_candle["low_b"] = min(self.current_candle["low_b"], price_b)
+            self.current_candle["close_b"] = price_b
+            self.current_candle["ticks"] += 1
+
+        # --- 2. Instantaneous Spread & Mark-to-Market Z-Score ---
         current_spread = float(np.log(price_a) - self.alpha - self.beta * np.log(price_b))
-        self.spread_history.append(current_spread)
-        if len(self.spread_history) > self.zscore_window:
-            self.spread_history.pop(0)
+        zscore = float((current_spread - self.rolling_mean) / self.rolling_std)
 
-        # 2. Compute rolling Z-score
-        spread_arr = np.array(self.spread_history)
-        rolling_mean = float(np.mean(spread_arr))
-        rolling_std = float(np.std(spread_arr))
-        zscore = float((current_spread - rolling_mean) / rolling_std) if rolling_std > 1e-8 else 0.0
-
-        # 3. State machine logic
+        # --- 3. State Machine Logic ---
         action_taken = "HOLD"
         reason = ""
 
         if self.current_position_state == 0:
-            # Check entry
+            # Check entry conditions
             if zscore <= -self.entry_threshold:
                 # Undervalued spread -> Long spread (Buy A, Sell B)
-                self._open_spread_position(target_state=1, price_a=price_a, price_b=price_b, timestamp_str=timestamp_str)
+                self._open_spread_position(target_state=1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
                 action_taken = "OPEN_LONG_SPREAD"
                 reason = f"Z-score {zscore:.2f} <= -{self.entry_threshold}"
             elif zscore >= self.entry_threshold:
                 # Overvalued spread -> Short spread (Sell A, Buy B)
-                self._open_spread_position(target_state=-1, price_a=price_a, price_b=price_b, timestamp_str=timestamp_str)
+                self._open_spread_position(target_state=-1, price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str)
                 action_taken = "OPEN_SHORT_SPREAD"
                 reason = f"Z-score {zscore:.2f} >= +{self.entry_threshold}"
         else:
-            self.bars_in_trade += 1
-            # Check exit
+            # Check exit conditions
             should_exit = False
             exit_reason = ""
 
@@ -274,24 +425,25 @@ class PaperTradingEngine:
                     exit_reason = f"Emergency stop triggered (Z={zscore:.2f} >= {self.emergency_threshold})"
 
             if should_exit:
-                self._close_spread_position(price_a=price_a, price_b=price_b, timestamp_str=timestamp_str, reason=exit_reason)
+                self._close_spread_position(price_a=price_a, price_b=price_b, timestamp_str=canonical_ts_str, reason=exit_reason)
                 action_taken = "CLOSE_SPREAD"
                 reason = exit_reason
 
-        # 4. Compile live snapshot
+        # --- 4. Portfolio Metrics & Live Snapshot ---
         unrealized = self.account.get_unrealized_pnl(current_prices)
         total_equity = self.account.get_total_equity(current_prices)
         total_pnl = total_equity - self.account.initial_balance
         pnl_pct = (total_pnl / self.account.initial_balance) * 100.0
+        candle_progress = round((bar_elapsed_seconds / self.candle_seconds) * 100.0, 1)
 
         snapshot = {
-            "timestamp": timestamp_str,
+            "timestamp": canonical_ts_str,
             "pair": self.pair_name,
             "price_a": price_a,
             "price_b": price_b,
             "spread": current_spread,
-            "rolling_mean": rolling_mean,
-            "rolling_std": rolling_std,
+            "rolling_mean": self.rolling_mean,
+            "rolling_std": self.rolling_std,
             "zscore": zscore,
             "position_state": self.current_position_state,
             "action": action_taken,
@@ -302,7 +454,16 @@ class PaperTradingEngine:
             "total_equity": total_equity,
             "pnl_pct": pnl_pct,
             "total_trades": len(self.account.closed_trades),
-            "fees_paid": self.account.total_fees_paid
+            "fees_paid": self.account.total_fees_paid,
+            # 5-Minute Candle Accumulator Telemetry
+            "candle_minutes": self.candle_minutes,
+            "candle_progress_pct": candle_progress,
+            "candle_elapsed_seconds": bar_elapsed_seconds,
+            "candle_closed": candle_closed,
+            "ticks_in_candle": self.current_candle["ticks"] if self.current_candle else 1,
+            "candle_open_a": self.current_candle["open_a"] if self.current_candle else price_a,
+            "candle_open_b": self.current_candle["open_b"] if self.current_candle else price_b,
+            "bars_in_trade": self.bars_in_trade
         }
 
         self._save_state(snapshot)
@@ -414,4 +575,3 @@ class PaperTradingEngine:
         if self.account.closed_trades:
             trades_df = pd.DataFrame(self.account.closed_trades)
             trades_df.to_csv(self.results_dir / "paper_trades.csv", index=False)
-
