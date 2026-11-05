@@ -108,7 +108,7 @@
     }
 
     // --- Navigation Header Component ---
-    function Header({ backendOnline, status, onStep, onToggleAuto, isAutoPlaying, onReset, isStepping }) {
+    function Header({ backendOnline, isLiveStreaming, status, onStep, onToggleAuto, isAutoPlaying, onReset, isStepping }) {
       return (
         <header className="flex flex-col lg:flex-row lg:items-center justify-between pb-6 mb-6 border-b border-slate-800/80 gap-4">
           <div className="flex items-center gap-3.5">
@@ -135,12 +135,20 @@
           {/* Controls & Real-time Backend Status */}
           <div className="flex items-center gap-3 flex-wrap">
             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold mono transition ${
-              backendOnline
+              isLiveStreaming
+                ? "bg-rose-500/15 border-rose-500/40 text-rose-300 shadow-sm shadow-rose-500/20"
+                : backendOnline
                 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
                 : "bg-amber-500/10 border-amber-500/30 text-amber-400"
             }`}>
-              <span className={`w-2 h-2 rounded-full ${backendOnline ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`}></span>
-              {backendOnline ? "FastAPI Connected" : "Connecting Backend..."}
+              <span className={`w-2 h-2 rounded-full ${
+                isLiveStreaming
+                  ? "bg-rose-500 animate-ping"
+                  : backendOnline
+                  ? "bg-emerald-400 animate-pulse"
+                  : "bg-amber-400"
+              }`}></span>
+              {isLiveStreaming ? "🔴 LIVE BINANCE STREAM" : backendOnline ? "FastAPI Connected" : "Connecting Backend..."}
             </div>
 
             <button
@@ -285,6 +293,7 @@
 
       const [isAutoPlaying, setIsAutoPlaying] = useState(false);
       const [isStepping, setIsStepping] = useState(false);
+      const [isLiveStreaming, setIsLiveStreaming] = useState(false);
 
       const spreadChartRef = useRef(null);
       const zscoreChartRef = useRef(null);
@@ -305,6 +314,9 @@
           if (resStatus) {
             setStatus(resStatus);
             setBackendOnline(true);
+            if (resStatus.worker && resStatus.worker.mode === "LIVE") {
+              setIsLiveStreaming(true);
+            }
           } else {
             setBackendOnline(false);
           }
@@ -327,7 +339,69 @@
         }
       };
 
-      // Initial load & periodic polling
+      // Real-time WebSocket listener for autonomous background worker
+      useEffect(() => {
+        let ws = null;
+        let reconnectTimer = null;
+
+        const connectWs = () => {
+          try {
+            const loc = window.location;
+            const wsProtocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+            // Handle both relative path and API_BASE if set
+            let wsHost = loc.host;
+            if (API_BASE && API_BASE.startsWith("http")) {
+              const url = new URL(API_BASE);
+              wsHost = url.host;
+            }
+            const wsUrl = `${wsProtocol}//${wsHost}/ws/ticks`;
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+              setIsLiveStreaming(true);
+              setBackendOnline(true);
+            };
+
+            ws.onmessage = (event) => {
+              try {
+                const tick = JSON.parse(event.data);
+                if (tick && tick.pair) {
+                  setStatus(prev => ({ ...prev, ...tick }));
+                  setBackendOnline(true);
+                  setIsLiveStreaming(true);
+                  // If candle boundary crossed, refresh historical series
+                  if (tick.candle_closed) {
+                    fetchJsonSafe('/api/history').then(resHist => {
+                      if (resHist && resHist.labels) setHistory(resHist);
+                    });
+                  }
+                }
+              } catch (e) {
+                console.error("WS message parse error:", e);
+              }
+            };
+
+            ws.onerror = () => {
+              // WebSocket fallback to polling
+            };
+
+            ws.onclose = () => {
+              reconnectTimer = setTimeout(connectWs, 3000);
+            };
+          } catch (e) {
+            console.warn("WebSocket not supported, relying on HTTP polling", e);
+          }
+        };
+
+        connectWs();
+
+        return () => {
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          if (ws) ws.close();
+        };
+      }, []);
+
+      // Initial load & periodic polling fallback
       useEffect(() => {
         fetchAllData();
         const poll = setInterval(fetchAllData, 2500);
@@ -511,6 +585,7 @@
         <div className="max-w-7xl mx-auto px-4 py-6 lg:py-8 space-y-6">
           <Header
             backendOnline={backendOnline}
+            isLiveStreaming={isLiveStreaming}
             status={status}
             onStep={handleStep}
             onToggleAuto={handleToggleAuto}
@@ -582,8 +657,11 @@
                       Log Price Residual <span className="mono text-cyan-300">S_t = ln(BTC) - α - β ln(ETH)</span> with ±2.0σ entry bounds
                     </p>
                   </div>
-                  <span className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 mono border border-slate-700/60 self-start sm:self-auto">
-                    {status.timestamp || "Live Tick"}
+                  <span className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 mono border border-slate-700/60 self-start sm:self-auto flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
+                    <span>5m Bar: {status.candle_progress_pct ? Number(status.candle_progress_pct).toFixed(0) : 0}% ({status.candle_elapsed_seconds || 0}s/300s)</span>
+                    <span className="text-slate-600">&bull;</span>
+                    <span>{status.timestamp || "Live Tick"}</span>
                   </span>
                 </div>
                 <div className="h-64 relative">
