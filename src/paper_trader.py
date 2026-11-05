@@ -1203,27 +1203,32 @@ class PaperTradingEngine:
 
     def _close_spread_position(self, price_a: float, price_b: float, timestamp_str: str, reason: str):
         """Liquidates both legs for spread exit and records trade PnL."""
-        pos_a = self.account.positions.pop(self.asset_a)
-        pos_b = self.account.positions.pop(self.asset_b)
+        pos_a = self.account.positions.pop(self.asset_a, None)
+        pos_b = self.account.positions.pop(self.asset_b, None)
 
-        close_side_a = "SELL" if pos_a.side == "LONG" else "BUY"
-        close_side_b = "SELL" if pos_b.side == "LONG" else "BUY"
+        gross_pnl_a, fee_a = 0.0, 0.0
+        gross_pnl_b, fee_b = 0.0, 0.0
 
-        fill_a = self.account.execute_fill(self.asset_a, close_side_a, pos_a.contracts, price_a, timestamp_str)
-        fill_b = self.account.execute_fill(self.asset_b, close_side_b, pos_b.contracts, price_b, timestamp_str)
+        if pos_a is not None:
+            close_side_a = "SELL" if pos_a.side == "LONG" else "BUY"
+            fill_a = self.account.execute_fill(self.asset_a, close_side_a, pos_a.contracts, price_a, timestamp_str)
+            fee_a = fill_a["fee"]
+            if pos_a.side == "LONG":
+                gross_pnl_a = pos_a.contracts * (fill_a["fill_price"] - pos_a.entry_price)
+            else:
+                gross_pnl_a = pos_a.contracts * (pos_a.entry_price - fill_a["fill_price"])
 
-        if pos_a.side == "LONG":
-            gross_pnl_a = pos_a.contracts * (fill_a["fill_price"] - pos_a.entry_price)
-        else:
-            gross_pnl_a = pos_a.contracts * (pos_a.entry_price - fill_a["fill_price"])
-
-        if pos_b.side == "LONG":
-            gross_pnl_b = pos_b.contracts * (fill_b["fill_price"] - pos_b.entry_price)
-        else:
-            gross_pnl_b = pos_b.contracts * (pos_b.entry_price - fill_b["fill_price"])
+        if pos_b is not None:
+            close_side_b = "SELL" if pos_b.side == "LONG" else "BUY"
+            fill_b = self.account.execute_fill(self.asset_b, close_side_b, pos_b.contracts, price_b, timestamp_str)
+            fee_b = fill_b["fee"]
+            if pos_b.side == "LONG":
+                gross_pnl_b = pos_b.contracts * (fill_b["fill_price"] - pos_b.entry_price)
+            else:
+                gross_pnl_b = pos_b.contracts * (pos_b.entry_price - fill_b["fill_price"])
 
         total_gross_pnl = gross_pnl_a + gross_pnl_b
-        exit_fees = fill_a["fee"] + fill_b["fee"]
+        exit_fees = fee_a + fee_b
         entry_fees = self.current_trade_meta["entry_fees"] if self.current_trade_meta else 0.0
         total_trade_fees = entry_fees + exit_fees
         net_trade_pnl = total_gross_pnl - total_trade_fees
