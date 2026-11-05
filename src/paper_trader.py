@@ -79,6 +79,7 @@ BINANCE_FUTURES_RULES: Dict[str, SymbolRules] = {
     "LINKUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=3),
     "AVAXUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=3),
     "LTCUSDT": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=2),
+    "DOTUSDT": SymbolRules(step_size=0.1, min_qty=0.1, min_notional=5.0, qty_precision=1, price_precision=3),
 }
 
 
@@ -484,7 +485,10 @@ class PaperTradingEngine:
             self.rolling_std = 0.005
 
     def _load_calibrated_parameters(self) -> Tuple[float, float]:
-        """Loads static cointegration alpha and beta from previous screening."""
+        """
+        Loads static cointegration alpha and beta from previous screening,
+        or dynamically fits an OLS regression if the pair assets exist in aligned data.
+        """
         screening_file = self.results_dir / "pair_screening_results.csv"
         if not screening_file.exists():
             screening_file = PROCESSED_DATA_DIR / "pair_screening_results.csv"
@@ -498,12 +502,48 @@ class PaperTradingEngine:
                     beta = float(match.iloc[0]["beta"])
                     logger.info(f"Loaded calibrated parameters for {self.pair_name}: Alpha={alpha:.4f}, Beta={beta:.4f}")
                     return alpha, beta
+
+                # Check reverse pair: A/B vs B/A
+                rev_pair = f"{self.asset_b}/{self.asset_a}"
+                match_rev = df[df["pair"] == rev_pair]
+                if not match_rev.empty:
+                    b_rev = float(match_rev.iloc[0]["beta"])
+                    a_rev = float(match_rev.iloc[0]["alpha"])
+                    if abs(b_rev) > 1e-6:
+                        beta = 1.0 / b_rev
+                        alpha = -a_rev / b_rev
+                        logger.info(f"Derived inverted parameters for {self.pair_name} from {rev_pair}: Alpha={alpha:.4f}, Beta={beta:.4f}")
+                        return alpha, beta
             except Exception as e:
                 logger.warning(f"Could not load screening parameters: {e}")
 
-        # Default fallback calibrated parameters for BTC/ETH
-        logger.info(f"Using default parameters for {self.pair_name}: Alpha=1.4648, Beta=1.1678")
-        return 1.4648, 1.1678
+        # Check if assets exist in historical aligned data and fit dynamic OLS
+        aligned_path = PROCESSED_DATA_DIR / "aligned_close_prices.csv"
+        if aligned_path.exists():
+            try:
+                df_prices = pd.read_csv(aligned_path)
+                if self.asset_a in df_prices.columns and self.asset_b in df_prices.columns:
+                    import statsmodels.api as sm
+                    y = np.log(df_prices[self.asset_a].dropna().values)
+                    x = np.log(df_prices[self.asset_b].dropna().values)
+                    min_len = min(len(y), len(x))
+                    y = y[-min_len:]
+                    x = x[-min_len:]
+                    X = sm.add_constant(x)
+                    ols_fit = sm.OLS(y, X).fit()
+                    alpha = float(ols_fit.params[0])
+                    beta = float(ols_fit.params[1])
+                    logger.info(f"Dynamically fitted OLS parameters for {self.pair_name}: Alpha={alpha:.4f}, Beta={beta:.4f}")
+                    return alpha, beta
+            except Exception as e:
+                logger.warning(f"Dynamic OLS calibration failed for {self.pair_name}: {e}")
+
+        # Default fallback calibrated parameters for BTC/ETH or general pair
+        if self.pair_name == "BTCUSDT/ETHUSDT":
+            logger.info(f"Using default parameters for {self.pair_name}: Alpha=1.4648, Beta=1.1678")
+            return 1.4648, 1.1678
+        logger.info(f"Using standard default parameters for {self.pair_name}: Alpha=0.0, Beta=1.0")
+        return 0.0, 1.0
 
     def _warmup_spread_history(self):
         """Initializes rolling spread buffer with the most recent completed 5-minute bars."""
@@ -518,8 +558,94 @@ class PaperTradingEngine:
                     self.spread_history = list(spreads)
                     self._update_rolling_statistics()
                     logger.info(f"Warmed up spread buffer with {len(self.spread_history)} historical 5m bars. Baseline Mean={self.rolling_mean:.6f}, Std={self.rolling_std:.6f}")
+                else:
+                    self.spread_history = []
+                    self._update_rolling_statistics()
             except Exception as e:
                 logger.warning(f"Could not warm up spread history: {e}")
+
+    def switch_pair(
+        self,
+        new_pair: str,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
+        clear_positions: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Dynamically transitions the engine to a new trading pair:
+        - Halts the active WebSocket multiplex price stream.
+        - Liquidates/clears previous open positions to avoid cross-pair margin confusion.
+        - Reconfigures asset symbols, hedge ratio beta, and alpha intercept.
+        - Re-initializes 5m candle accumulator and rolling spread history.
+        - Reboots the Binance multiplex WebSocket stream for the new pair.
+        - Returns transition summary metadata.
+        """
+        old_pair = self.pair_name
+        clean_pair = new_pair.strip().upper()
+        if "/" not in clean_pair:
+            raise ValueError(f"Invalid pair format '{new_pair}'. Expected 'ASSET_A/ASSET_B' (e.g. 'SOLUSDT/AVAXUSDT').")
+
+        parts = clean_pair.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(f"Invalid pair format '{new_pair}'. Expected two non-empty symbols.")
+
+        new_a, new_b = parts[0], parts[1]
+
+        # 1. Stop current price stream
+        was_streaming = bool(self.price_stream and self.price_stream.is_connected)
+        self.stop_price_stream()
+
+        # 2. Reset open positions to prevent cross-pair contamination
+        if clear_positions:
+            self.account.positions.clear()
+            self.current_position_state = 0
+            self.bars_in_trade = 0
+            self.current_trade_meta = None
+
+        # 3. Update symbols
+        self.pair_name = clean_pair
+        self.asset_a = new_a
+        self.asset_b = new_b
+
+        # 4. Load or fit cointegration parameters
+        if alpha is not None and beta is not None:
+            self.alpha = float(alpha)
+            self.beta = float(beta)
+        else:
+            self.alpha, self.beta = self._load_calibrated_parameters()
+
+        # 5. Reset candle accumulator
+        self.current_bar_id = None
+        self.current_candle = None
+        self.last_completed_candle = None
+
+        # 6. Warm up spread history for new pair
+        self.spread_history = []
+        self._warmup_spread_history()
+        self._update_rolling_statistics()
+
+        # 7. Re-initialize multiplex WebSocket price stream
+        self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
+        if was_streaming:
+            self.start_price_stream()
+
+        self.last_rejection_reason = None
+        logger.info(
+            f"Successfully switched trading pair from {old_pair} to {self.pair_name} "
+            f"(Alpha={self.alpha:.4f}, Beta={self.beta:.4f}, Baseline Mean={self.rolling_mean:.6f}, Std={self.rolling_std:.6f})"
+        )
+
+        return {
+            "old_pair": old_pair,
+            "new_pair": self.pair_name,
+            "asset_a": self.asset_a,
+            "asset_b": self.asset_b,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "rolling_mean": self.rolling_mean,
+            "rolling_std": self.rolling_std,
+            "stream_started": was_streaming
+        }
 
     def start_price_stream(self):
         """Initializes and connects zero-latency Binance multiplex WebSocket price stream."""
