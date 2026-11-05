@@ -143,7 +143,8 @@ class PaperTradingEngine:
         candle_minutes: int = market_config.candle_minutes,
         alpha: Optional[float] = None,
         beta: Optional[float] = None,
-        results_dir: Path = RESULTS_DIR
+        results_dir: Path = RESULTS_DIR,
+        recover_state: bool = True
     ):
         parts = pair.replace("-", "/").split("/")
         self.asset_a = parts[0].upper()
@@ -184,6 +185,10 @@ class PaperTradingEngine:
         # Warm up spread history with recent aligned matrix if present
         self._warmup_spread_history()
         self._update_rolling_statistics()
+
+        # Re-hydrate persistent state, open positions & trade history from disk
+        if recover_state:
+            self._recover_state_from_disk()
 
     @staticmethod
     def _parse_timestamp(ts_str: Optional[str]) -> datetime:
@@ -436,6 +441,19 @@ class PaperTradingEngine:
         pnl_pct = (total_pnl / self.account.initial_balance) * 100.0
         candle_progress = round((bar_elapsed_seconds / self.candle_seconds) * 100.0, 1)
 
+        # Serialize active positions
+        positions_dict = {
+            sym: {
+                "symbol": pos.symbol,
+                "side": pos.side,
+                "contracts": pos.contracts,
+                "entry_price": pos.entry_price,
+                "notional": pos.notional,
+                "entry_time": pos.entry_time
+            }
+            for sym, pos in self.account.positions.items()
+        }
+
         snapshot = {
             "timestamp": canonical_ts_str,
             "pair": self.pair_name,
@@ -448,6 +466,7 @@ class PaperTradingEngine:
             "position_state": self.current_position_state,
             "action": action_taken,
             "reason": reason,
+            "initial_balance": self.account.initial_balance,
             "cash_balance": self.account.cash_balance,
             "unrealized_pnl": unrealized,
             "realized_pnl": self.account.realized_pnl,
@@ -455,6 +474,9 @@ class PaperTradingEngine:
             "pnl_pct": pnl_pct,
             "total_trades": len(self.account.closed_trades),
             "fees_paid": self.account.total_fees_paid,
+            # Position & Trade Lifecycle State
+            "positions": positions_dict,
+            "current_trade_meta": self.current_trade_meta,
             # 5-Minute Candle Accumulator Telemetry
             "candle_minutes": self.candle_minutes,
             "candle_progress_pct": candle_progress,
@@ -575,3 +597,112 @@ class PaperTradingEngine:
         if self.account.closed_trades:
             trades_df = pd.DataFrame(self.account.closed_trades)
             trades_df.to_csv(self.results_dir / "paper_trades.csv", index=False)
+
+    def _recover_state_from_disk(self) -> bool:
+        """
+        Re-hydrates portfolio state from disk upon engine startup or server reboot.
+        Restores:
+          - account.cash_balance
+          - account.realized_pnl
+          - account.total_fees_paid
+          - account.positions (reconstructed Position dataclasses)
+          - current_position_state (+1, -1, 0)
+          - bars_in_trade
+          - current_trade_meta
+          - account.closed_trades (loaded from paper_trades.csv)
+        Returns:
+          True if state was successfully recovered from disk, False otherwise.
+        """
+        state_file = self.results_dir / "paper_trading_state.json"
+        trades_file = self.results_dir / "paper_trades.csv"
+
+        # 1. Recover completed trades ledger if available
+        if trades_file.exists():
+            try:
+                trades_df = pd.read_csv(trades_file)
+                if not trades_df.empty:
+                    self.account.closed_trades = trades_df.to_dict(orient="records")
+                    logger.info(f"Loaded {len(self.account.closed_trades)} historical trades from {trades_file}")
+            except Exception as e:
+                logger.warning(f"Could not load historical trades from {trades_file}: {e}")
+
+        # 2. Recover live state snapshot if available
+        if not state_file.exists():
+            return False
+
+        try:
+            with open(state_file, "r") as f:
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                return False
+
+            # Verify target pair matches
+            saved_pair = data.get("pair")
+            if saved_pair and saved_pair != self.pair_name:
+                logger.info(f"State file is for different pair ({saved_pair} vs {self.pair_name}), skipping recovery.")
+                return False
+
+            if "initial_balance" in data:
+                self.account.initial_balance = float(data["initial_balance"])
+            if "cash_balance" in data:
+                self.account.cash_balance = float(data["cash_balance"])
+            if "realized_pnl" in data:
+                self.account.realized_pnl = float(data["realized_pnl"])
+            if "fees_paid" in data:
+                self.account.total_fees_paid = float(data["fees_paid"])
+            if "position_state" in data:
+                self.current_position_state = int(data["position_state"])
+            if "bars_in_trade" in data:
+                self.bars_in_trade = int(data["bars_in_trade"])
+            if "current_trade_meta" in data:
+                self.current_trade_meta = data.get("current_trade_meta")
+
+            # Re-hydrate open positions
+            raw_positions = data.get("positions", {})
+            self.account.positions = {}
+            for sym, pos_data in raw_positions.items():
+                self.account.positions[sym] = Position(
+                    symbol=pos_data["symbol"],
+                    side=pos_data["side"],
+                    contracts=float(pos_data["contracts"]),
+                    entry_price=float(pos_data["entry_price"]),
+                    notional=float(pos_data["notional"]),
+                    entry_time=str(pos_data.get("entry_time", ""))
+                )
+
+            # Fallback re-hydration for older state files without explicit "positions" dict
+            if self.current_position_state != 0 and not self.account.positions and self.current_trade_meta:
+                meta = self.current_trade_meta
+                side_a = "LONG" if self.current_position_state == 1 else "SHORT"
+                side_b = "SHORT" if self.current_position_state == 1 else "LONG"
+                entry_time = meta.get("entry_time", data.get("timestamp", ""))
+
+                if "contracts_a" in meta and "entry_price_a" in meta:
+                    self.account.positions[self.asset_a] = Position(
+                        symbol=self.asset_a,
+                        side=side_a,
+                        contracts=float(meta["contracts_a"]),
+                        entry_price=float(meta["entry_price_a"]),
+                        notional=float(meta["contracts_a"]) * float(meta["entry_price_a"]),
+                        entry_time=entry_time
+                    )
+                if "contracts_b" in meta and "entry_price_b" in meta:
+                    self.account.positions[self.asset_b] = Position(
+                        symbol=self.asset_b,
+                        side=side_b,
+                        contracts=float(meta["contracts_b"]),
+                        entry_price=float(meta["entry_price_b"]),
+                        notional=float(meta["contracts_b"]) * float(meta["entry_price_b"]),
+                        entry_time=entry_time
+                    )
+
+            logger.info(
+                f"Recovered state for {self.pair_name}: Cash=${self.account.cash_balance:,.2f}, "
+                f"Realized PnL=${self.account.realized_pnl:+,.2f}, PositionState={self.current_position_state}, "
+                f"OpenLegs={list(self.account.positions.keys())}, ClosedTrades={len(self.account.closed_trades)}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Error during state recovery from {state_file}: {e}")
+            return False
