@@ -14,7 +14,7 @@
     ],
     "timeframe": "5m",
     "total_bars_aligned": 8640,
-    "total_pairs_screened": 1,
+    "total_pairs_screened": 45,
     "eligible_cointegrated_pairs_count": 1,
     "selected_pair": "BTCUSDT/ETHUSDT",
     "m1_static_ols": {

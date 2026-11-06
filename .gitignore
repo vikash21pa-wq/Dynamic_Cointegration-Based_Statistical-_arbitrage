@@ -15,3 +15,8 @@ env/
 venv/
 *.log
 
+# Live Paper Trading Runtime State
+results/paper_trading_state.json
+results/paper_trades.csv
+results/paper_funding.csv
+

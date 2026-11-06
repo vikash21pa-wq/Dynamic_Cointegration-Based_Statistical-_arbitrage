@@ -786,6 +786,57 @@ class PaperTradingEngine:
         dt = self._parse_timestamp(timestamp_str)
         canonical_ts_str = dt.strftime("%Y-%m-%d %H:%M:%S")
 
+        # Reject invalid/non-positive/infinite price ticks to prevent NaN corruption in statistics
+        if (
+            price_a is None or price_b is None
+            or price_a <= 0 or price_b <= 0
+            or not (math.isfinite(price_a) and math.isfinite(price_b))
+        ):
+            logger.warning(
+                f"[{canonical_ts_str}] Rejected invalid market tick: {self.asset_a}={price_a}, {self.asset_b}={price_b}"
+            )
+            return {
+                "timestamp": canonical_ts_str,
+                "pair": self.pair_name,
+                "price_a": price_a if (price_a is not None and math.isfinite(price_a)) else 0.0,
+                "price_b": price_b if (price_b is not None and math.isfinite(price_b)) else 0.0,
+                "spread": 0.0,
+                "rolling_mean": self.rolling_mean,
+                "rolling_std": self.rolling_std,
+                "zscore": 0.0,
+                "position_state": self.current_position_state,
+                "action": "REJECTED_TICK",
+                "reason": "Invalid price: values must be strictly positive and finite",
+                "initial_balance": self.account.initial_balance,
+                "cash_balance": self.account.cash_balance,
+                "unrealized_pnl": 0.0,
+                "realized_pnl": self.account.realized_pnl,
+                "total_equity": self.account.cash_balance,
+                "pnl_pct": 0.0,
+                "total_trades": len(self.account.closed_trades),
+                "fees_paid": self.account.total_fees_paid,
+                "leverage": self.account.leverage,
+                "initial_margin_locked": round(self.account.initial_margin_locked, 2),
+                "maintenance_margin": 0.0,
+                "free_margin": round(self.account.free_margin, 2),
+                "margin_ratio": 0.0,
+                "total_funding_paid": round(self.account.total_funding_paid, 4),
+                "last_funding_period_id": self.last_funding_period_id,
+                "funding_settled": False,
+                "feed_source": "WEBSOCKET_MULTIPLEX" if (self.price_stream and self.price_stream.is_connected) else "REST_POLLING",
+                "stream_connected": bool(self.price_stream and self.price_stream.is_connected),
+                "positions": {},
+                "current_trade_meta": self.current_trade_meta,
+                "candle_minutes": self.candle_minutes,
+                "candle_progress_pct": 0.0,
+                "candle_elapsed_seconds": 0,
+                "candle_closed": False,
+                "ticks_in_candle": self.current_candle["ticks"] if self.current_candle else 0,
+                "candle_open_a": self.current_candle["open_a"] if self.current_candle else 0.0,
+                "candle_open_b": self.current_candle["open_b"] if self.current_candle else 0.0,
+                "bars_in_trade": self.bars_in_trade
+            }
+
         current_prices = {self.asset_a: price_a, self.asset_b: price_b}
         bar_id = int(dt.timestamp()) // self.candle_seconds
         bar_elapsed_seconds = int(dt.timestamp()) % self.candle_seconds
