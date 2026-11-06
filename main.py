@@ -21,6 +21,8 @@ from config import (
     selection_config,
     trading_config,
     kalman_config,
+    delta_config,
+    active_exchange,
     PROCESSED_DATA_DIR,
     RAW_DATA_DIR,
     RESULTS_DIR
@@ -118,6 +120,7 @@ def run_experiment(
     screen_only: bool = False,
     custom_pair: Optional[str] = None,
     method: str = "all",
+    exchange: str = active_exchange,
     capital: Optional[float] = None,
     allocation: Optional[float] = None,
     export_results: bool = True,
@@ -128,18 +131,20 @@ def run_experiment(
     """
     logger = setup_logger(quiet=quiet)
 
-    from src.data_loader import BinanceFuturesDataLoader, generate_synthetic_futures_data
+    from src.data_loader import BinanceFuturesDataLoader, DeltaExchangeDataLoader, generate_synthetic_futures_data
     from src.preprocessing import DataPreprocessor
     from src.pair_selection import PairSelectionEngine
     from src.backtester import PairsBacktester
 
     initial_capital = capital if capital is not None else trading_config.initial_capital
     pair_allocation = allocation if allocation is not None else trading_config.pair_gross_allocation
+    universe = delta_config.universe if exchange.lower() == "delta" else market_config.universe
 
     print("\n" + "=" * 80)
-    print("  DYNAMIC COINTEGRATION STATISTICAL ARBITRAGE - CRYPTOCURRENCY MARKETS")
+    print(f"  DYNAMIC COINTEGRATION STATISTICAL ARBITRAGE - {exchange.upper()} EXCHANGE")
     print("=" * 80)
-    logger.info(f"Universe: {', '.join(market_config.universe)}")
+    logger.info(f"Exchange Platform: {exchange.upper()} (API: {delta_config.rest_url if exchange.lower() == 'delta' else 'Binance Futures'})")
+    logger.info(f"Universe ({len(universe)} assets): {', '.join(universe)}")
     logger.info(f"Timeframe: {market_config.timeframe} | History: {days} days")
     logger.info(f"Simulated Capital: ${initial_capital:,.2f} | Leverage: {trading_config.leverage}x | Allocation: {pair_allocation*100:.1f}%")
 
@@ -147,33 +152,50 @@ def run_experiment(
     # STAGE 1: DATA ENGINEERING & COLLECTION
     # -------------------------------------------------------------
     logger.info("\n--- [STAGE 1/4] DATA ENGINEERING & COLLECTION ---")
-    data_loader = BinanceFuturesDataLoader(raw_dir=RAW_DATA_DIR)
     raw_data = None
 
     if use_synthetic:
         logger.info("Using calibrated synthetic multi-asset crypto dataset...")
         raw_data = generate_synthetic_futures_data(
-            symbols=market_config.universe,
+            symbols=universe,
             n_bars=days * 288,
             seed=42
         )
-    else:
-        logger.info("Querying Binance USDT-M Perpetual Futures 5m candles...")
+    elif exchange.lower() == "delta":
+        logger.info(f"Querying Delta Exchange ({delta_config.environment}) Perpetual Futures 5m candles...")
+        delta_loader = DeltaExchangeDataLoader(raw_dir=RAW_DATA_DIR, base_url=delta_config.rest_url)
         try:
-            downloaded = data_loader.download_universe(
-                symbols=market_config.universe,
+            downloaded = delta_loader.download_universe(
+                symbols=universe,
                 days=days,
                 interval=market_config.timeframe,
                 force_refresh=force_refresh
             )
-            if downloaded and len(downloaded) >= len(market_config.universe):
+            if downloaded and len(downloaded) >= 2:
+                raw_data = downloaded
+            else:
+                raise RuntimeError("Incomplete universe downloaded from Delta Exchange.")
+        except Exception as e:
+            logger.warning(f"Delta Exchange download error ({e}). Falling back to calibrated market dataset.")
+            raw_data = generate_synthetic_futures_data(symbols=universe, n_bars=days * 288, seed=42)
+    else:
+        logger.info("Querying Binance USDT-M Perpetual Futures 5m candles...")
+        data_loader = BinanceFuturesDataLoader(raw_dir=RAW_DATA_DIR)
+        try:
+            downloaded = data_loader.download_universe(
+                symbols=universe,
+                days=days,
+                interval=market_config.timeframe,
+                force_refresh=force_refresh
+            )
+            if downloaded and len(downloaded) >= len(universe):
                 raw_data = downloaded
             else:
                 raise RuntimeError("Incomplete universe downloaded from exchange.")
         except Exception as e:
             logger.warning(f"Live network download unavailable ({e}). Falling back to calibrated market dataset.")
             raw_data = generate_synthetic_futures_data(
-                symbols=market_config.universe,
+                symbols=universe,
                 n_bars=days * 288,
                 seed=42
             )
@@ -414,6 +436,8 @@ Examples:
     )
     parser.add_argument("-r", "--results", "--view-results", action="store_true", dest="view_results",
                         help="Instantly view saved experiment results and screening leaderboard")
+    parser.add_argument("--exchange", choices=["delta", "binance"], default=active_exchange,
+                        help="Exchange platform: delta (Delta Exchange India/Global) or binance (default: delta)")
     parser.add_argument("--days", type=int, default=30,
                         help="Number of days of 5m historical candles (default: 30)")
     parser.add_argument("--pair", type=str, default=None,
@@ -446,6 +470,7 @@ Examples:
         screen_only=args.screen_only,
         custom_pair=args.pair,
         method=args.method,
+        exchange=args.exchange,
         capital=args.capital,
         allocation=args.allocation,
         quiet=args.quiet

@@ -11,6 +11,7 @@ Verifies the complete pipeline lifecycle across all modules:
 import json
 import math
 from pathlib import Path
+import numpy as np
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -49,8 +50,8 @@ def test_full_arbitrage_trade_lifecycle_integration(isolated_results_dir):
     )
     pe.alpha = 1.4648
     pe.beta = 1.1678
-    pe.rolling_mean = 0.0
-    pe.rolling_std = 0.01
+    pe.spread_history = np.random.RandomState(42).normal(0.0, 0.01, pe.zscore_window).tolist()
+    pe._update_rolling_statistics()
 
     # 1. Intra-candle tick aggregation in Bar 1 (12:00:00 - 12:04:59)
     snap1 = pe.process_tick(price_a=46000.0, price_b=2800.0, timestamp_str="2026-11-05 12:00:15")
@@ -156,8 +157,8 @@ def test_margin_shock_and_liquidation_integration(isolated_results_dir):
     )
     pe.alpha = 1.4648
     pe.beta = 1.1678
-    pe.rolling_mean = 0.0
-    pe.rolling_std = 0.01
+    pe.spread_history = np.random.RandomState(42).normal(0.0, 0.01, pe.zscore_window).tolist()
+    pe._update_rolling_statistics()
 
     # Enter Long Spread: Buy BTC @ 40,000, Sell ETH @ 3,000 (Z-score <= -2.0)
     pe.process_tick(price_a=40000.0, price_b=3000.0, timestamp_str="2026-11-05 10:00:00")

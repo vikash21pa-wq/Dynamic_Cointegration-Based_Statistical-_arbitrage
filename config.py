@@ -116,8 +116,46 @@ class PaperTradingConfig:
     poll_interval_seconds: int = 5
 
 
+@dataclass
+class DeltaConfig:
+    api_key: str = field(default_factory=lambda: os.getenv("DELTA_API_KEY", "5QtWt22iUBsBawMj8uIrtJezs8YUjT"))
+    api_secret: str = field(default_factory=lambda: os.getenv("DELTA_API_SECRET", "NTjv3v9Z0xWPQ8PGBUParbEaYc3pHPrmvzc9ogqjt6Z6nwARfqqVNPLQCCce"))
+    environment: str = field(default_factory=lambda: os.getenv("DELTA_ENVIRONMENT", "india").lower())
+    default_pair: str = "BTCUSD/ETHUSD"
+    universe: List[str] = field(default_factory=lambda: [
+        "BTCUSD",
+        "ETHUSD",
+        "SOLUSD",
+        "AVAXUSD",
+        "BNBUSD",
+        "XRPUSD",
+        "ADAUSD",
+        "DOGEUSD",
+        "LINKUSD",
+        "LTCUSD"
+    ])
+
+    @property
+    def rest_url(self) -> str:
+        if self.environment == "testnet":
+            return "https://testnet-api.delta.exchange"
+        elif self.environment == "global":
+            return "https://api.delta.exchange"
+        return "https://api.india.delta.exchange"
+
+    @property
+    def ws_url(self) -> str:
+        if self.environment == "testnet":
+            return "wss://testnet-socket.delta.exchange"
+        elif self.environment == "global":
+            return "wss://socket.delta.exchange"
+        return "wss://socket.india.delta.exchange"
+
+
 market_config = MarketConfig()
 selection_config = SelectionConfig()
 trading_config = TradingConfig()
 kalman_config = KalmanConfig()
 paper_config = PaperTradingConfig()
+delta_config = DeltaConfig()
+active_exchange = os.getenv("ACTIVE_EXCHANGE", "delta").lower()

@@ -21,14 +21,22 @@ import numpy as np
 import pandas as pd
 import uvicorn
 
-from config import RESULTS_DIR, PROCESSED_DATA_DIR, trading_config, market_config
+from config import (
+    RESULTS_DIR,
+    PROCESSED_DATA_DIR,
+    trading_config,
+    market_config,
+    delta_config,
+    active_exchange
+)
 from src.paper_trader import PaperTradingEngine, PaperAccount
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("crypto_stat_arb")
 
 # Global engine and concurrency primitives
-engine = PaperTradingEngine(pair="BTCUSDT/ETHUSDT")
+default_pair = os.getenv("DEFAULT_PAIR", "BTCUSDT/ETHUSDT")
+engine = PaperTradingEngine(pair=default_pair)
 engine_lock: Optional[asyncio.Lock] = None
 
 
@@ -208,6 +216,8 @@ async def health_check():
     return {
         "status": "ok",
         "app": "crypto-stat-arb-backend",
+        "exchange": engine.exchange.upper(),
+        "pair": engine.pair_name,
         "worker_running": worker_state["running"],
         "worker_mode": worker_state["mode"],
         "ticks_processed": worker_state["ticks_processed"],
@@ -366,14 +376,22 @@ async def list_available_pairs():
     pairs_list = []
     seen = set()
 
-    # Curated top candidate pairs to guarantee presence
-    curated = [
-        {"pair": "BTCUSDT/ETHUSDT", "correlation": 0.821, "beta": 1.1678, "alpha": 1.4648, "coint_t_stat": -4.12, "half_life_hours": "1.2h", "eligible": True},
-        {"pair": "SOLUSDT/AVAXUSDT", "correlation": 0.892, "beta": 0.7412, "alpha": 6.9580, "coint_t_stat": -3.65, "half_life_hours": "18.7h", "eligible": True},
-        {"pair": "ADAUSDT/DOTUSDT", "correlation": 0.865, "beta": 0.8841, "alpha": -1.4520, "coint_t_stat": -3.41, "half_life_hours": "22.4h", "eligible": True},
-        {"pair": "ETHUSDT/BNBUSDT", "correlation": 0.530, "beta": 0.9520, "alpha": 2.1240, "coint_t_stat": -2.95, "half_life_hours": "1.6h", "eligible": False},
-        {"pair": "BTCUSDT/BNBUSDT", "correlation": 0.646, "beta": 1.0820, "alpha": 4.1500, "coint_t_stat": -3.10, "half_life_hours": "1.8h", "eligible": False},
+    # Curated top candidate pairs according to active exchange
+    curated_delta = [
+        {"pair": "BTCUSD/ETHUSD", "exchange": "DELTA", "correlation": 0.815, "beta": 1.1520, "alpha": 1.4800, "coint_t_stat": -4.25, "half_life_hours": "1.2h", "eligible": True},
+        {"pair": "BNBUSD/LINKUSD", "exchange": "DELTA", "correlation": 0.651, "beta": 0.3437, "alpha": 5.7238, "coint_t_stat": -3.82, "half_life_hours": "3.4h", "eligible": True},
+        {"pair": "AVAXUSD/BNBUSD", "exchange": "DELTA", "correlation": 0.589, "beta": 1.5613, "alpha": -1.2150, "coint_t_stat": -3.54, "half_life_hours": "2.8h", "eligible": True},
+        {"pair": "ADAUSD/LTCUSD", "exchange": "DELTA", "correlation": 0.670, "beta": 0.8813, "alpha": -2.3100, "coint_t_stat": -3.39, "half_life_hours": "1.3h", "eligible": True},
+        {"pair": "SOLUSD/LINKUSD", "exchange": "DELTA", "correlation": 0.734, "beta": 0.6534, "alpha": 3.1200, "coint_t_stat": -3.31, "half_life_hours": "5.7h", "eligible": True},
     ]
+    curated_binance = [
+        {"pair": "BTCUSDT/ETHUSDT", "exchange": "BINANCE", "correlation": 0.821, "beta": 1.1678, "alpha": 1.4648, "coint_t_stat": -4.12, "half_life_hours": "1.2h", "eligible": True},
+        {"pair": "SOLUSDT/AVAXUSDT", "exchange": "BINANCE", "correlation": 0.892, "beta": 0.7412, "alpha": 6.9580, "coint_t_stat": -3.65, "half_life_hours": "18.7h", "eligible": True},
+        {"pair": "ADAUSDT/DOTUSDT", "exchange": "BINANCE", "correlation": 0.865, "beta": 0.8841, "alpha": -1.4520, "coint_t_stat": -3.41, "half_life_hours": "22.4h", "eligible": True},
+        {"pair": "ETHUSDT/BNBUSDT", "exchange": "BINANCE", "correlation": 0.530, "beta": 0.9520, "alpha": 2.1240, "coint_t_stat": -2.95, "half_life_hours": "1.6h", "eligible": False},
+        {"pair": "BTCUSDT/BNBUSDT", "exchange": "BINANCE", "correlation": 0.646, "beta": 1.0820, "alpha": 4.1500, "coint_t_stat": -3.10, "half_life_hours": "1.8h", "eligible": False},
+    ]
+    curated = (curated_delta + curated_binance) if engine.exchange == "delta" else (curated_binance + curated_delta)
 
     for c in curated:
         p = c["pair"]
@@ -703,6 +721,8 @@ def start():
     print("=" * 68)
     print("  LAUNCHING QUANTITATIVE CRYPTO STATISTICAL ARBITRAGE DASHBOARD")
     print("=" * 68)
+    print(f"  Exchange Platform   : {engine.exchange.upper()}")
+    print(f"  Active Pair         : {engine.pair_name}")
     print(f"  Listening on        : http://{host}:{port}")
     print(f"  API Docs            : http://{host}:{port}/docs")
     print(f"  WebSocket Stream    : ws://{host}:{port}/ws/ticks")

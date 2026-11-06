@@ -140,7 +140,7 @@
               <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-2">
                 <span>Cryptocurrency Statistical Arbitrage</span>
                 <span className="text-slate-600">&bull;</span>
-                <span className="mono text-cyan-300">Binance USDT-M Futures</span>
+                <span className="mono text-cyan-300">{status?.exchange ? `${status.exchange} Futures` : "Delta Exchange"}</span>
               </p>
             </div>
           </div>
@@ -152,7 +152,7 @@
               <i className="fa-solid fa-arrows-split-up-and-left text-cyan-400"></i>
               <span className="text-slate-400 hidden sm:inline">Pair:</span>
               <select
-                value={activePair || status?.pair || "BTCUSDT/ETHUSDT"}
+                value={activePair || status?.pair || "BTCUSD/ETHUSD"}
                 onChange={(e) => onSelectPair && onSelectPair(e.target.value)}
                 disabled={isSwitchingPair}
                 className="bg-transparent text-cyan-300 font-bold outline-none cursor-pointer pr-1"
@@ -165,8 +165,8 @@
                     </option>
                   ))
                 ) : (
-                  <option value={status?.pair || "BTCUSDT/ETHUSDT"} className="bg-slate-900 text-white font-medium">
-                    {status?.pair || "BTCUSDT/ETHUSDT"}
+                  <option value={status?.pair || "BTCUSD/ETHUSD"} className="bg-slate-900 text-white font-medium">
+                    {status?.pair || "BTCUSD/ETHUSD"}
                   </option>
                 )}
               </select>
@@ -187,7 +187,7 @@
                   ? "bg-emerald-400 animate-pulse"
                   : "bg-amber-400"
               }`}></span>
-              {isLiveStreaming ? (status?.feed_source === "WEBSOCKET_MULTIPLEX" ? "⚡ WS MULTIPLEX (0ms)" : "🔴 LIVE BINANCE STREAM") : backendOnline ? "FastAPI Connected" : "Connecting Backend..."}
+              {isLiveStreaming ? (status?.feed_source === "WEBSOCKET_MULTIPLEX" ? "⚡ WS MULTIPLEX (0ms)" : `🔴 LIVE ${status?.exchange || "DELTA"} STREAM`) : backendOnline ? "FastAPI Connected" : "Connecting Backend..."}
             </div>
 
             <button

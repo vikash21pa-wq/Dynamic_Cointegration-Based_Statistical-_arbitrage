@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import requests
 
-from config import RAW_DATA_DIR, market_config
+from config import RAW_DATA_DIR, market_config, delta_config
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -204,6 +204,164 @@ class BinanceFuturesDataLoader:
             except Exception as e:
                 logger.error(f"Error fetching data for {s}: {e}")
                 logger.warning("Network connection to Binance unavailable. Halting remote queries immediately.")
+                break
+        return data_dict
+
+
+class DeltaExchangeDataLoader:
+    """
+    Downloads and caches historical 5m OHLCV data directly from Delta Exchange API.
+    Supports Delta India (api.india.delta.exchange), Global, and Testnet.
+    No API keys are required for historical public market data.
+    """
+
+    def __init__(self, raw_dir: Path = RAW_DATA_DIR, base_url: Optional[str] = None):
+        self.raw_dir = Path(raw_dir)
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.base_url = base_url or getattr(delta_config, "rest_url", "https://api.india.delta.exchange")
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "DeltaStatisticalArbitrage/1.0"
+        })
+
+    def fetch_candles_chunk(
+        self,
+        symbol: str,
+        resolution: str = "5m",
+        start_time_sec: Optional[int] = None,
+        end_time_sec: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetches up to 4000 candles from Delta Exchange /v2/history/candles.
+        """
+        clean_symbol = symbol.replace("USDT", "USD")
+        params = {
+            "resolution": resolution,
+            "symbol": clean_symbol
+        }
+        if start_time_sec is not None:
+            params["start"] = int(start_time_sec)
+        if end_time_sec is not None:
+            params["end"] = int(end_time_sec)
+
+        url = f"{self.base_url}/v2/history/candles"
+        try:
+            resp = self.session.get(url, params=params, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("result", [])
+            else:
+                logger.warning(f"Delta API status {resp.status_code} for {clean_symbol}: {resp.text[:120]}")
+        except Exception as e:
+            logger.warning(f"Delta API query failed for {clean_symbol}: {e}")
+        return []
+
+    def download_symbol_history(
+        self,
+        symbol: str,
+        days: int = 30,
+        interval: str = "5m",
+        end_time: Optional[datetime] = None
+    ) -> pd.DataFrame:
+        """
+        Paginates backwards through Delta Exchange 5m candles to collect full continuous history.
+        """
+        clean_symbol = symbol.replace("USDT", "USD")
+        if end_time is None:
+            end_time = datetime.now(timezone.utc)
+        elif end_time.tzinfo is None:
+            end_time = end_time.replace(tzinfo=timezone.utc)
+
+        end_sec = int(end_time.timestamp())
+        start_sec = end_sec - (days * 24 * 3600)
+
+        logger.info(f"Downloading Delta {clean_symbol} ({interval}) from {datetime.fromtimestamp(start_sec, tz=timezone.utc)} to {datetime.fromtimestamp(end_sec, tz=timezone.utc)}")
+
+        all_candles = []
+        curr_end = end_sec
+        attempts = 0
+
+        while curr_end > start_sec and attempts < 10:
+            attempts += 1
+            chunk = self.fetch_candles_chunk(
+                symbol=clean_symbol,
+                resolution=interval,
+                start_time_sec=start_sec,
+                end_time_sec=curr_end
+            )
+            if not chunk:
+                break
+            all_candles.extend(chunk)
+            oldest_ts = min(c["time"] for c in chunk)
+            if oldest_ts <= start_sec or len(chunk) < 50:
+                break
+            curr_end = oldest_ts - 1
+            time.sleep(0.05)
+
+        if not all_candles:
+            raise ValueError(f"No Delta Exchange candles retrieved for {clean_symbol}.")
+
+        df = pd.DataFrame(all_candles)
+        df.drop_duplicates(subset=["time"], inplace=True)
+        df.sort_values("time", inplace=True)
+        df["timestamp"] = (df["time"] * 1000).astype(np.int64)
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df["open"] = df["open"].astype(np.float64)
+        df["high"] = df["high"].astype(np.float64)
+        df["low"] = df["low"].astype(np.float64)
+        df["close"] = df["close"].astype(np.float64)
+        df["volume"] = df["volume"].astype(np.float64)
+        df["quote_volume"] = df["volume"] * df["close"]
+        df["count"] = 1
+
+        # Date range filter
+        df = df[(df["time"] >= start_sec) & (df["time"] <= end_sec)]
+        df.reset_index(drop=True, inplace=True)
+        return df[["timestamp", "datetime", "open", "high", "low", "close", "volume", "quote_volume", "count"]]
+
+    def get_or_download(
+        self,
+        symbol: str,
+        days: int = 30,
+        interval: str = "5m",
+        force_refresh: bool = False
+    ) -> pd.DataFrame:
+        clean_symbol = symbol.replace("USDT", "USD")
+        filepath = self.raw_dir / f"delta_{clean_symbol}_{interval}.csv"
+        if filepath.exists() and not force_refresh:
+            try:
+                df = pd.read_csv(filepath)
+                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+                span_days = (df["datetime"].iloc[-1] - df["datetime"].iloc[0]).total_seconds() / 86400.0
+                if span_days >= (days - 1):
+                    logger.info(f"Loaded Delta {clean_symbol} from cache ({len(df)} rows, ~{span_days:.1f} days).")
+                    return df
+            except Exception as e:
+                logger.warning(f"Could not load Delta cache for {clean_symbol}: {e}. Re-downloading.")
+
+        df = self.download_symbol_history(symbol=clean_symbol, days=days, interval=interval)
+        df.to_csv(filepath, index=False)
+        logger.info(f"Cached Delta {clean_symbol} to {filepath} ({len(df)} rows).")
+        return df
+
+    def download_universe(
+        self,
+        symbols: Optional[List[str]] = None,
+        days: int = 30,
+        interval: str = "5m",
+        force_refresh: bool = False
+    ) -> Dict[str, pd.DataFrame]:
+        if symbols is None:
+            symbols = getattr(delta_config, "universe", ["BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "BNBUSD"])
+
+        data_dict = {}
+        for s in symbols:
+            try:
+                clean_sym = s.replace("USDT", "USD")
+                df = self.get_or_download(clean_sym, days=days, interval=interval, force_refresh=force_refresh)
+                data_dict[clean_sym] = df
+            except Exception as e:
+                logger.error(f"Error fetching Delta data for {s}: {e}")
                 break
         return data_dict
 

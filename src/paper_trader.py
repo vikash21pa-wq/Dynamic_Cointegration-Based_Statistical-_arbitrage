@@ -24,6 +24,8 @@ from config import (
     paper_config,
     trading_config,
     market_config,
+    delta_config,
+    active_exchange,
     PROCESSED_DATA_DIR,
     RESULTS_DIR
 )
@@ -80,6 +82,20 @@ BINANCE_FUTURES_RULES: Dict[str, SymbolRules] = {
     "AVAXUSDT": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=3),
     "LTCUSDT": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=2),
     "DOTUSDT": SymbolRules(step_size=0.1, min_qty=0.1, min_notional=5.0, qty_precision=1, price_precision=3),
+}
+
+# Delta Exchange India / Global Perpetual Futures Specifications
+DELTA_FUTURES_RULES: Dict[str, SymbolRules] = {
+    "BTCUSD": SymbolRules(step_size=0.001, min_qty=0.001, min_notional=5.0, qty_precision=3, price_precision=1),
+    "ETHUSD": SymbolRules(step_size=0.01, min_qty=0.01, min_notional=5.0, qty_precision=2, price_precision=2),
+    "SOLUSD": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=4),
+    "AVAXUSD": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=4),
+    "BNBUSD": SymbolRules(step_size=0.1, min_qty=0.1, min_notional=5.0, qty_precision=1, price_precision=3),
+    "XRPUSD": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=4),
+    "ADAUSD": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=5),
+    "DOGEUSD": SymbolRules(step_size=100.0, min_qty=100.0, min_notional=5.0, qty_precision=0, price_precision=6),
+    "LINKUSD": SymbolRules(step_size=1.0, min_qty=1.0, min_notional=5.0, qty_precision=0, price_precision=3),
+    "LTCUSD": SymbolRules(step_size=0.1, min_qty=0.1, min_notional=5.0, qty_precision=1, price_precision=2),
 }
 
 
@@ -192,6 +208,143 @@ class BinanceMultiplexPriceStream:
 
     def stop(self):
         """Gracefully halts WebSocket stream and joins worker thread."""
+        self._running = False
+        self.is_connected = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.5)
+
+
+class DeltaMultiplexPriceStream:
+    """
+    Real-Time WebSocket Client connecting to Delta Exchange WebSocket:
+        wss://socket.india.delta.exchange (or configured delta_config.ws_url)
+    Subscribes to 'v2/ticker' channel for both legs with automatic
+    reconnection, keepalive handling, and thread-safe price caching.
+    """
+
+    def __init__(self, asset_a: str, asset_b: str, ws_url: Optional[str] = None):
+        self.asset_a = asset_a.upper().replace("USDT", "USD")
+        self.asset_b = asset_b.upper().replace("USDT", "USD")
+        self.ws_url = ws_url or getattr(delta_config, "ws_url", "wss://socket.india.delta.exchange")
+        self.prices: Dict[str, float] = {}
+        self.bids: Dict[str, float] = {}
+        self.asks: Dict[str, float] = {}
+        self.mark_prices: Dict[str, float] = {}
+        self.funding_rates: Dict[str, float] = {}
+        self.last_updated: Dict[str, float] = {}
+        self.is_connected: bool = False
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def handle_message(self, raw_msg: str):
+        """Parses incoming Delta v2/ticker JSON and updates thread-safe price cache."""
+        try:
+            data = json.loads(raw_msg)
+            msg_type = data.get("type")
+            if msg_type == "v2/ticker":
+                sym = data.get("symbol")
+                if sym in (self.asset_a, self.asset_b):
+                    mark = data.get("mark_price")
+                    close = data.get("close")
+                    bid = data.get("best_bid")
+                    ask = data.get("best_ask")
+                    fr = data.get("funding_rate")
+
+                    price = None
+                    if bid is not None and ask is not None and float(bid) > 0 and float(ask) > 0:
+                        price = (float(bid) + float(ask)) / 2.0
+                    elif mark is not None and float(mark) > 0:
+                        price = float(mark)
+                    elif close is not None and float(close) > 0:
+                        price = float(close)
+
+                    now = time.time()
+                    if price is not None:
+                        with self._lock:
+                            self.prices[sym] = float(price)
+                            if mark is not None:
+                                self.mark_prices[sym] = float(mark)
+                            if bid is not None:
+                                self.bids[sym] = float(bid)
+                            if ask is not None:
+                                self.asks[sym] = float(ask)
+                            if fr is not None:
+                                self.funding_rates[sym] = float(fr)
+                            self.last_updated[sym] = now
+                            self.is_connected = True
+        except Exception as e:
+            logger.debug(f"Error parsing Delta WS ticker payload: {e}")
+
+    def get_latest_prices(self, max_staleness_seconds: float = 10.0) -> Tuple[Optional[float], Optional[float]]:
+        now = time.time()
+        with self._lock:
+            p_a = self.prices.get(self.asset_a)
+            p_b = self.prices.get(self.asset_b)
+            t_a = self.last_updated.get(self.asset_a, 0.0)
+            t_b = self.last_updated.get(self.asset_b, 0.0)
+
+            if p_a is not None and p_b is not None:
+                if (now - t_a) <= max_staleness_seconds and (now - t_b) <= max_staleness_seconds:
+                    return p_a, p_b
+        return None, None
+
+    async def _async_run(self):
+        try:
+            import websockets
+        except ImportError:
+            logger.warning("websockets package not available for DeltaMultiplexPriceStream.")
+            return
+
+        backoff = 1.0
+        while self._running:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10) as ws:
+                    sub_msg = {
+                        "type": "subscribe",
+                        "payload": {
+                            "channels": [
+                                {
+                                    "name": "v2/ticker",
+                                    "symbols": [self.asset_a, self.asset_b]
+                                }
+                            ]
+                        }
+                    }
+                    await ws.send(json.dumps(sub_msg))
+                    with self._lock:
+                        self.is_connected = True
+                    backoff = 1.0
+                    logger.info(f"Connected to Delta WebSocket at {self.ws_url} for {self.asset_a}, {self.asset_b}")
+
+                    while self._running:
+                        msg = await ws.recv()
+                        self.handle_message(msg)
+            except Exception as e:
+                with self._lock:
+                    self.is_connected = False
+                if not self._running:
+                    break
+                logger.debug(f"Delta WebSocket disconnected: {e}. Reconnecting in {backoff:.1f}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 1.5, 30.0)
+
+    def _thread_worker(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._async_run())
+        finally:
+            loop.close()
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._thread_worker, daemon=True, name="DeltaMultiplexStream")
+        self._thread.start()
+
+    def stop(self):
         self._running = False
         self.is_connected = False
         if self._thread and self._thread.is_alive():
@@ -390,12 +543,24 @@ class PaperTradingEngine:
         results_dir: Path = RESULTS_DIR,
         recover_state: bool = True,
         leverage: float = trading_config.leverage,
-        maintenance_margin_pct: Optional[float] = None
+        maintenance_margin_pct: Optional[float] = None,
+        exchange: Optional[str] = None
     ):
         parts = pair.replace("-", "/").split("/")
         self.asset_a = parts[0].upper()
         self.asset_b = parts[1].upper()
         self.pair_name = f"{self.asset_a}/{self.asset_b}"
+
+        # Determine exchange platform (Delta Exchange vs Binance)
+        if exchange is not None:
+            self.exchange = exchange.lower()
+        elif ("USD" in self.asset_a and not self.asset_a.endswith("USDT")) or ("USD" in self.asset_b and not self.asset_b.endswith("USDT")):
+            self.exchange = "delta"
+        elif self.asset_a.endswith("USDT") or self.asset_b.endswith("USDT"):
+            self.exchange = "binance"
+        else:
+            self.exchange = getattr(paper_config, "exchange", active_exchange).lower()
+
         self.allocation_pct = allocation_pct
         self.zscore_window = zscore_window
         self.entry_threshold = entry_threshold
@@ -405,6 +570,7 @@ class PaperTradingEngine:
         self.candle_seconds = candle_minutes * 60
         self.min_order_notional: float = trading_config.min_order_notional
         self.symbol_rules: Dict[str, SymbolRules] = dict(BINANCE_FUTURES_RULES)
+        self.symbol_rules.update(DELTA_FUTURES_RULES)
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -416,7 +582,10 @@ class PaperTradingEngine:
         self.leverage = self.account.leverage
         self.last_rejection_reason: Optional[str] = None
         self.last_funding_period_id: Optional[int] = None
-        self.price_stream: Optional[BinanceMultiplexPriceStream] = None
+        if self.exchange == "delta":
+            self.price_stream = DeltaMultiplexPriceStream(self.asset_a, self.asset_b)
+        else:
+            self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
         self.spread_history: List[float] = []
         self.current_position_state: int = 0  # 0: Flat, +1: Long spread, -1: Short spread
         self.bars_in_trade: int = 0
@@ -522,10 +691,12 @@ class PaperTradingEngine:
         if aligned_path.exists():
             try:
                 df_prices = pd.read_csv(aligned_path)
-                if self.asset_a in df_prices.columns and self.asset_b in df_prices.columns:
+                col_a = self._resolve_column_name(self.asset_a, df_prices.columns)
+                col_b = self._resolve_column_name(self.asset_b, df_prices.columns)
+                if col_a and col_b:
                     import statsmodels.api as sm
-                    y = np.log(df_prices[self.asset_a].dropna().values)
-                    x = np.log(df_prices[self.asset_b].dropna().values)
+                    y = np.log(df_prices[col_a].dropna().values)
+                    x = np.log(df_prices[col_b].dropna().values)
                     min_len = min(len(y), len(x))
                     y = y[-min_len:]
                     x = x[-min_len:]
@@ -539,11 +710,26 @@ class PaperTradingEngine:
                 logger.warning(f"Dynamic OLS calibration failed for {self.pair_name}: {e}")
 
         # Default fallback calibrated parameters for BTC/ETH or general pair
-        if self.pair_name == "BTCUSDT/ETHUSDT":
+        if self.pair_name in ["BTCUSDT/ETHUSDT", "BTCUSD/ETHUSD"]:
             logger.info(f"Using default parameters for {self.pair_name}: Alpha=1.4648, Beta=1.1678")
             return 1.4648, 1.1678
         logger.info(f"Using standard default parameters for {self.pair_name}: Alpha=0.0, Beta=1.0")
         return 0.0, 1.0
+
+    @staticmethod
+    def _resolve_column_name(symbol: str, columns: Any) -> Optional[str]:
+        """Resolves symbol against dataframe columns, supporting USDT <-> USD alias matching."""
+        if symbol in columns:
+            return symbol
+        if symbol.endswith("USDT"):
+            usd_equiv = symbol[:-1]
+            if usd_equiv in columns:
+                return usd_equiv
+        elif symbol.endswith("USD"):
+            usdt_equiv = symbol + "T"
+            if usdt_equiv in columns:
+                return usdt_equiv
+        return None
 
     def _warmup_spread_history(self):
         """Initializes rolling spread buffer with the most recent completed 5-minute bars."""
@@ -551,9 +737,11 @@ class PaperTradingEngine:
         if aligned_path.exists():
             try:
                 df = pd.read_csv(aligned_path)
-                if self.asset_a in df.columns and self.asset_b in df.columns:
-                    p_a = df[self.asset_a].values[-self.zscore_window:]
-                    p_b = df[self.asset_b].values[-self.zscore_window:]
+                col_a = self._resolve_column_name(self.asset_a, df.columns)
+                col_b = self._resolve_column_name(self.asset_b, df.columns)
+                if col_a and col_b:
+                    p_a = df[col_a].values[-self.zscore_window:]
+                    p_b = df[col_b].values[-self.zscore_window:]
                     spreads = np.log(p_a) - self.alpha - self.beta * np.log(p_b)
                     self.spread_history = list(spreads)
                     self._update_rolling_statistics()
@@ -602,10 +790,14 @@ class PaperTradingEngine:
             self.bars_in_trade = 0
             self.current_trade_meta = None
 
-        # 3. Update symbols
+        # 3. Update symbols & exchange detection
         self.pair_name = clean_pair
         self.asset_a = new_a
         self.asset_b = new_b
+        if ("USD" in new_a and not new_a.endswith("USDT")) or ("USD" in new_b and not new_b.endswith("USDT")):
+            self.exchange = "delta"
+        elif new_a.endswith("USDT") or new_b.endswith("USDT"):
+            self.exchange = "binance"
 
         # 4. Load or fit cointegration parameters
         if alpha is not None and beta is not None:
@@ -625,7 +817,10 @@ class PaperTradingEngine:
         self._update_rolling_statistics()
 
         # 7. Re-initialize multiplex WebSocket price stream
-        self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
+        if self.exchange == "delta":
+            self.price_stream = DeltaMultiplexPriceStream(self.asset_a, self.asset_b)
+        else:
+            self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
         if was_streaming:
             self.start_price_stream()
 
@@ -648,11 +843,14 @@ class PaperTradingEngine:
         }
 
     def start_price_stream(self):
-        """Initializes and connects zero-latency Binance multiplex WebSocket price stream."""
+        """Initializes and connects zero-latency multiplex WebSocket price stream."""
         if self.price_stream is None:
-            self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
+            if self.exchange == "delta":
+                self.price_stream = DeltaMultiplexPriceStream(self.asset_a, self.asset_b)
+            else:
+                self.price_stream = BinanceMultiplexPriceStream(self.asset_a, self.asset_b)
         self.price_stream.start()
-        logger.info(f"Started multiplex WebSocket price stream for {self.pair_name}")
+        logger.info(f"Started multiplex WebSocket price stream for {self.pair_name} ({self.exchange.upper()})")
 
     def stop_price_stream(self):
         """Halts the multiplex WebSocket price stream."""
@@ -662,9 +860,9 @@ class PaperTradingEngine:
 
     def fetch_live_prices(self) -> Tuple[Optional[float], Optional[float]]:
         """
-        Fetches current market mid-prices for Asset A and Asset B from Binance.
-        Priority 1: Zero-latency Binance WebSocket multiplex stream (wss://fstream.binance.com/ws/...).
-        Priority 2: Fallback to Binance Futures REST API batch bookTicker.
+        Fetches current market mid-prices for Asset A and Asset B.
+        Priority 1: Zero-latency WebSocket multiplex stream (Binance or Delta Exchange).
+        Priority 2: Fallback to REST API tickers.
         """
         # 1. Attempt WebSocket multiplex stream read first
         if self.price_stream is not None and self.price_stream.is_connected:
@@ -672,7 +870,24 @@ class PaperTradingEngine:
             if p_a is not None and p_b is not None:
                 return p_a, p_b
 
-        # 2. REST Batch Fallback
+        # 2. REST Fallback: Delta Exchange
+        if self.exchange == "delta":
+            prices = {}
+            for sym in [self.asset_a, self.asset_b]:
+                clean_sym = sym.replace("USDT", "USD")
+                url = f"{delta_config.rest_url}/v2/tickers/{clean_sym}"
+                try:
+                    resp = requests.get(url, timeout=3.0)
+                    if resp.status_code == 200:
+                        res = resp.json().get("result", {})
+                        p = res.get("mark_price") or res.get("close")
+                        if p is not None:
+                            prices[sym] = float(p)
+                except Exception:
+                    pass
+            return prices.get(self.asset_a), prices.get(self.asset_b)
+
+        # 2b. REST Fallback: Binance Batch
         url = "https://fapi.binance.com/fapi/v1/ticker/bookTicker"
         try:
             resp = requests.get(url, timeout=3.5)
@@ -690,7 +905,7 @@ class PaperTradingEngine:
         except Exception:
             pass
 
-        # 3. Fallback to individual requests if batch fails
+        # 3. Fallback to individual Binance requests if batch fails
         prices = {}
         for sym in [self.asset_a, self.asset_b]:
             try:
@@ -705,13 +920,31 @@ class PaperTradingEngine:
 
     def fetch_live_funding_rates(self) -> Dict[str, float]:
         """
-        Fetches current 8-hour perpetual funding rates from Binance Futures API.
+        Fetches current 8-hour perpetual funding rates from exchange API.
         Falls back to trading_config.default_funding_rate_8h (0.0001 = 0.01%) if network is unavailable.
         """
         rates = {
             self.asset_a: trading_config.default_funding_rate_8h,
             self.asset_b: trading_config.default_funding_rate_8h
         }
+
+        # Delta Exchange funding rates
+        if self.exchange == "delta":
+            for sym in (self.asset_a, self.asset_b):
+                clean_sym = sym.replace("USDT", "USD")
+                url = f"{delta_config.rest_url}/v2/tickers/{clean_sym}"
+                try:
+                    resp = requests.get(url, timeout=3.0)
+                    if resp.status_code == 200:
+                        res = resp.json().get("result", {})
+                        fr = res.get("funding_rate")
+                        if fr is not None:
+                            rates[sym] = float(fr)
+                except Exception:
+                    pass
+            return rates
+
+        # Binance Futures funding rates
         for sym in (self.asset_a, self.asset_b):
             try:
                 url = "https://fapi.binance.com/fapi/v1/premiumIndex"
@@ -1024,6 +1257,7 @@ class PaperTradingEngine:
 
         snapshot = {
             "timestamp": canonical_ts_str,
+            "exchange": self.exchange.upper(),
             "pair": self.pair_name,
             "price_a": price_a,
             "price_b": price_b,

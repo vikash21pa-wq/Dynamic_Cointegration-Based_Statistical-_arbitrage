@@ -94,6 +94,7 @@ def test_periodic_8h_funding_settlement_on_boundary(temp_results_dir):
     engine.beta = 1.0
     engine.rolling_mean = 0.0
     engine.rolling_std = 0.01
+    engine.spread_history = [0.0] * engine.zscore_window
 
     # Ingest baseline tick at 07:50 UTC to initialize engine funding period
     engine.process_tick(60000.0, 60000.0, "2026-03-01 07:50:00")
@@ -130,6 +131,7 @@ def test_no_funding_when_flat(temp_results_dir):
     engine.beta = 1.0
     engine.rolling_mean = 0.0
     engine.rolling_std = 0.01
+    engine.spread_history = [0.0] * engine.zscore_window
 
     snap1 = engine.process_tick(60000.0, 60000.0, "2026-03-01 07:55:00")
     assert snap1["position_state"] == 0

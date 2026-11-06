@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import numpy as np
@@ -17,6 +18,8 @@ import numpy as np
 from config import (
     paper_config,
     trading_config,
+    delta_config,
+    active_exchange,
     PROCESSED_DATA_DIR,
     RESULTS_DIR
 )
@@ -40,8 +43,9 @@ def print_dashboard(snapshot: dict, api_key: str, mode: str = "LIVE"):
     elif snapshot["position_state"] == -1:
         pos_desc = f"SHORT SPREAD (Short {snapshot['pair'].split('/')[0]}, Long {snapshot['pair'].split('/')[1]})"
 
+    exchange_name = snapshot.get("exchange", "DELTA")
     print("=" * 76)
-    print("      BINANCE USDT-M FUTURES STATISTICAL ARBITRAGE PAPER TRADER")
+    print(f"      {exchange_name} FUTURES STATISTICAL ARBITRAGE PAPER TRADER")
     print("=" * 76)
     print(f" Mode: {mode:<18} | API Key: {mask_key(api_key):<20} | Time: {snapshot['timestamp']}")
     print(f" Target Pair: {snapshot['pair']:<12} | Engine: Zero-Secret Virtual OMS | Alloc: {trading_config.pair_gross_allocation*100:.0f}%")
@@ -65,9 +69,10 @@ def print_dashboard(snapshot: dict, api_key: str, mode: str = "LIVE"):
     print("=" * 76)
 
 
-def run_live(engine: PaperTradingEngine, interval: int = 5):
-    """Continuous live market price monitoring loop using Binance multiplex WebSocket stream."""
-    print("Starting Live Paper Trading Monitor with Binance Multiplex WebSocket... (Press Ctrl+C to stop)")
+def run_live(engine: PaperTradingEngine, interval: int = 5, api_key: Optional[str] = None):
+    """Continuous live market price monitoring loop using multiplex WebSocket stream."""
+    key = api_key or (delta_config.api_key if engine.exchange == "delta" else paper_config.api_key)
+    print(f"Starting Live Paper Trading Monitor with {engine.exchange.upper()} Multiplex WebSocket... (Press Ctrl+C to stop)")
     engine.start_price_stream()
     try:
         while True:
@@ -79,7 +84,7 @@ def run_live(engine: PaperTradingEngine, interval: int = 5):
 
             snapshot = engine.process_tick(price_a, price_b)
             feed_label = f"LIVE ({snapshot.get('feed_source', 'STREAM')})"
-            print_dashboard(snapshot, paper_config.api_key, mode=feed_label)
+            print_dashboard(snapshot, key, mode=feed_label)
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nPaper Trading stopped by user.")
@@ -87,11 +92,12 @@ def run_live(engine: PaperTradingEngine, interval: int = 5):
         engine.stop_price_stream()
 
 
-def run_replay(engine: PaperTradingEngine, speed: float = 0.05, n_bars: int = 200):
+def run_replay(engine: PaperTradingEngine, speed: float = 0.05, n_bars: int = 200, api_key: Optional[str] = None):
     """
     Replays recent market bars to demonstrate live state machine transitions,
     order generation, fee deductions, and mark-to-market PnL updates.
     """
+    key = api_key or (delta_config.api_key if engine.exchange == "delta" else paper_config.api_key)
     aligned_file = PROCESSED_DATA_DIR / "aligned_close_prices.csv"
     if not aligned_file.exists():
         print(f"Aligned price data not found at {aligned_file}. Run 'python main.py' first.")
@@ -112,7 +118,7 @@ def run_replay(engine: PaperTradingEngine, speed: float = 0.05, n_bars: int = 20
         ts = str(row["datetime"])
 
         snapshot = engine.process_tick(p_a, p_b, timestamp_str=ts)
-        print_dashboard(snapshot, paper_config.api_key, mode="REPLAY / DEMO")
+        print_dashboard(snapshot, key, mode="REPLAY / DEMO")
         time.sleep(speed)
 
     print("\n Replay completed. Results persisted to 'results/paper_trading_state.json'")
@@ -121,8 +127,9 @@ def run_replay(engine: PaperTradingEngine, speed: float = 0.05, n_bars: int = 20
         print(f" Final Realized Net PnL: ${engine.account.realized_pnl:+,.2f}")
 
 
-def run_single_tick(engine: PaperTradingEngine):
+def run_single_tick(engine: PaperTradingEngine, api_key: Optional[str] = None):
     """Processes a single market tick and prints dashboard."""
+    key = api_key or (delta_config.api_key if engine.exchange == "delta" else paper_config.api_key)
     price_a, price_b = engine.fetch_live_prices()
     if price_a is None or price_b is None:
         # Fall back to latest known prices from aligned price matrix
@@ -136,10 +143,10 @@ def run_single_tick(engine: PaperTradingEngine):
             print("Could not retrieve live or cached market prices.")
             return
         snapshot = engine.process_tick(price_a, price_b, timestamp_str=ts)
-        print_dashboard(snapshot, paper_config.api_key, mode="SNAPSHOT (CACHED)")
+        print_dashboard(snapshot, key, mode="SNAPSHOT (CACHED)")
     else:
         snapshot = engine.process_tick(price_a, price_b)
-        print_dashboard(snapshot, paper_config.api_key, mode="SNAPSHOT (LIVE)")
+        print_dashboard(snapshot, key, mode="SNAPSHOT (LIVE)")
 
 
 def show_status():
@@ -176,10 +183,12 @@ Examples:
   python paper_trade.py --status              # Display active virtual portfolio status
         """
     )
+    parser.add_argument("--exchange", choices=["delta", "binance"], default=active_exchange,
+                        help="Exchange platform: delta (Delta Exchange) or binance (default: delta)")
     parser.add_argument("--once", action="store_true", help="Process a single market tick, print dashboard, and exit")
     parser.add_argument("--replay", action="store_true", help="Replay recent historical bars to simulate live paper trading")
     parser.add_argument("--live", action="store_true", help="Run live real-time price monitoring and trading")
-    parser.add_argument("--pair", type=str, default="BTCUSDT/ETHUSDT", help="Trading pair (default: BTCUSDT/ETHUSDT)")
+    parser.add_argument("--pair", type=str, default=None, help="Trading pair (default: BTCUSD/ETHUSD for Delta, BTCUSDT/ETHUSDT for Binance)")
     parser.add_argument("--capital", type=float, default=10000.0, help="Initial paper trading balance in USD")
     parser.add_argument("--speed", type=float, default=0.03, help="Replay delay per bar in seconds")
     parser.add_argument("--bars", type=int, default=200, help="Number of bars to replay in demo mode")
@@ -191,18 +200,25 @@ Examples:
         show_status()
         sys.exit(0)
 
+    target_pair = args.pair
+    if target_pair is None:
+        target_pair = "BTCUSD/ETHUSD" if args.exchange == "delta" else "BTCUSDT/ETHUSDT"
+
     engine = PaperTradingEngine(
-        pair=args.pair,
-        initial_capital=args.capital
+        pair=target_pair,
+        initial_capital=args.capital,
+        exchange=args.exchange
     )
 
+    api_key_to_display = delta_config.api_key if args.exchange == "delta" else paper_config.api_key
+
     if args.once:
-        run_single_tick(engine)
+        run_single_tick(engine, api_key=api_key_to_display)
     elif args.live:
-        run_live(engine)
+        run_live(engine, api_key=api_key_to_display)
     else:
         # Default to replay / demo mode for immediate testing
-        run_replay(engine, speed=args.speed, n_bars=args.bars)
+        run_replay(engine, speed=args.speed, n_bars=args.bars, api_key=api_key_to_display)
 
 
 if __name__ == "__main__":
