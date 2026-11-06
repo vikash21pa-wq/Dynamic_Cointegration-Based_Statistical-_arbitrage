@@ -124,6 +124,8 @@ def run_experiment(
     capital: Optional[float] = None,
     allocation: Optional[float] = None,
     max_pairs: int = 2,
+    min_corr: float = selection_config.target_correlation_min,
+    max_corr: float = selection_config.target_correlation_max,
     export_results: bool = True,
     quiet: bool = False
 ) -> Dict[str, Any]:
@@ -275,13 +277,18 @@ def run_experiment(
         )
         eligible_pairs = screening_results[screening_results["eligible"] == True]
 
-        # STAGE 3.1: Enforce Pair Selection Constraint (Never pick more than 2 pairs at once)
-        selected_pairs_df = pair_engine.select_pairs(screening_results, max_pairs=min(max_pairs, 2))
+        # STAGE 3.1: Enforce Pair Selection Constraint (Never pick more than 2 pairs at once, target correlation 0.94 - 0.97)
+        selected_pairs_df = pair_engine.select_pairs(
+            screening_results,
+            max_pairs=min(max_pairs, 2),
+            min_corr=min_corr,
+            max_corr=max_corr
+        )
         target_pair = selected_pairs_df.iloc[0] if not selected_pairs_df.empty else (
             eligible_pairs.iloc[0] if not eligible_pairs.empty else screening_results.iloc[0]
         )
         picked_names = selected_pairs_df["pair"].tolist() if not selected_pairs_df.empty else [target_pair["pair"]]
-        logger.info(f"Picked candidate pair(s) (validated <= 2 at once): {picked_names}")
+        logger.info(f"Picked candidate pair(s) (validated <= 2 at once, target corr [{min_corr:.2f}, {max_corr:.2f}]): {picked_names}")
 
     logger.info(f"Screening complete: {len(screening_results)} pairs tested, {len(eligible_pairs)} passed all statistical filters.")
 
@@ -463,6 +470,10 @@ Examples:
                         help="Gross notional capital allocation fraction per pair (default: 0.10)")
     parser.add_argument("--max-pairs", type=int, default=2,
                         help="Maximum pairs to pick/select simultaneously (validation limit: strictly <= 2, default: 2)")
+    parser.add_argument("--min-corr", type=float, default=selection_config.target_correlation_min,
+                        help="Minimum target correlation for pair selection (default: 0.94)")
+    parser.add_argument("--max-corr", type=float, default=selection_config.target_correlation_max,
+                        help="Maximum target correlation for pair selection (default: 0.97)")
     parser.add_argument("--screen-only", action="store_true",
                         help="Perform universe cointegration screening only")
     parser.add_argument("--synthetic", action="store_true",
@@ -489,6 +500,8 @@ Examples:
         capital=args.capital,
         allocation=args.allocation,
         max_pairs=args.max_pairs,
+        min_corr=args.min_corr,
+        max_corr=args.max_corr,
         quiet=args.quiet
     )
 

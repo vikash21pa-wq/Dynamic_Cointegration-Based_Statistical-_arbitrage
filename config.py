@@ -59,12 +59,14 @@ class SelectionConfig:
     reselection_bars: int = 7 * 288  # 2,016 bars
 
     # Screening criteria
-    min_correlation: float = 0.70  # Log return Pearson correlation
+    min_correlation: float = 0.70  # Baseline correlation threshold
+    target_correlation_min: float = 0.94  # Strict target correlation minimum (0.94 - 0.97)
+    target_correlation_max: float = 0.97  # Strict target correlation maximum (0.94 - 0.97)
     cointegration_alpha: float = 0.05  # Raw p-value threshold
     fdr_alpha: float = 0.10  # Benjamini-Hochberg False Discovery Rate threshold
     require_positive_beta: bool = True
     max_half_life_bars: int = 288 * 5  # Max half-life ~5 days for mean reversion
-    max_selected_pairs: int = 2  # Hard validation ceiling: never pick more than 2 pairs at once
+    max_selected_pairs: int = 2  # Hard validation ceiling: strictly at most 2 pairs at once
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,8 @@ class TradingConfig:
     leverage: float = 1.0
     maintenance_margin_pct: float = 0.05  # 5% maintenance margin rate for perpetual futures
     max_active_pairs: int = 2  # Hard validation ceiling: strictly at most 2 active pairs concurrently
+    target_correlation_min: float = 0.94
+    target_correlation_max: float = 0.97
     pair_gross_allocation: float = 0.10  # 10% of portfolio equity per active pair
     max_portfolio_drawdown: float = 0.10  # 10% portfolio drawdown circuit breaker
 

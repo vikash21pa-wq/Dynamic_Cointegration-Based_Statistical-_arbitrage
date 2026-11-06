@@ -107,6 +107,8 @@ class PairSelectionEngine:
         self.fdr_alpha = fdr_alpha
         self.require_positive_beta = require_positive_beta
         self.max_half_life_bars = max_half_life_bars
+        self.target_correlation_min = getattr(selection_config, "target_correlation_min", 0.94)
+        self.target_correlation_max = getattr(selection_config, "target_correlation_max", 0.97)
         self.processed_dir = Path(processed_dir)
 
     def analyze_pair(
@@ -264,19 +266,46 @@ class PairSelectionEngine:
             )
         return count
 
+    @staticmethod
+    def validate_pair_correlation(
+        corr: float,
+        min_corr: float = selection_config.target_correlation_min,
+        max_corr: float = selection_config.target_correlation_max
+    ) -> Tuple[bool, str]:
+        """
+        Validates that a pair's correlation falls within the target high-correlation band [0.94, 0.97].
+        """
+        abs_corr = abs(float(corr))
+        if abs_corr < min_corr or abs_corr > max_corr:
+            return (
+                False,
+                f"Correlation {abs_corr:.4f} outside required target range [{min_corr:.2f}, {max_corr:.2f}]."
+            )
+        return True, "OK"
+
     def select_pairs(
         self,
         df_results: pd.DataFrame,
-        max_pairs: int = selection_config.max_selected_pairs
+        max_pairs: int = selection_config.max_selected_pairs,
+        min_corr: Optional[float] = None,
+        max_corr: Optional[float] = None,
+        strict_correlation: bool = False
     ) -> pd.DataFrame:
         """
-        Picks the top cointegrated candidate pairs subject to a strict 2-pair validation ceiling.
-        Raises ValueError if max_pairs > 2.
+        Picks at most 2 candidate pairs, strictly prioritizing the highest correlation within the target range [0.94, 0.97]:
+        1. Enforces max_pairs <= 2.
+        2. Filters candidate pairs with correlation between min_corr (0.94) and max_corr (0.97).
+        3. If pairs exist in that target range, selects the top <=2 pairs with the highest correlation (descending).
+        4. If strict_correlation=True and no pairs match, raises ValueError.
+        5. If strict_correlation=False and no pairs fall in [min_corr, max_corr], falls back to highest correlation available.
         """
         self.validate_pair_count(max_pairs)
 
         if df_results.empty:
             return pd.DataFrame()
+
+        target_min = self.target_correlation_min if min_corr is None else float(min_corr)
+        target_max = self.target_correlation_max if max_corr is None else float(max_corr)
 
         # Prioritize statistically eligible pairs
         if "eligible" in df_results.columns and df_results["eligible"].any():
@@ -284,10 +313,39 @@ class PairSelectionEngine:
         else:
             candidates = df_results.copy()
 
-        # Sort by cointegration strength (lowest p-value / highest absolute t-stat)
-        if "p_value" in candidates.columns:
-            candidates.sort_values(by="p_value", ascending=True, inplace=True)
+        corr_col = "correlation" if "correlation" in candidates.columns else None
 
-        selected = candidates.head(max_pairs).copy()
+        if corr_col:
+            # 1. Check for pairs strictly within [0.94, 0.97]
+            in_band = candidates[
+                (candidates[corr_col].abs() >= target_min) &
+                (candidates[corr_col].abs() <= target_max)
+            ].copy()
+
+            if not in_band.empty:
+                # Rank by highest correlation descending
+                in_band.sort_values(by=corr_col, key=abs, ascending=False, inplace=True)
+                selected = in_band.head(max_pairs).copy()
+                logger.info(
+                    f"Selected {len(selected)} pair(s) in target correlation band [{target_min:.2f}, {target_max:.2f}]: "
+                    f"{selected['pair'].tolist() if 'pair' in selected.columns else []}"
+                )
+            else:
+                if strict_correlation:
+                    raise ValueError(
+                        f"Validation Error: No candidate pairs found with correlation between {target_min:.2f} and {target_max:.2f}. "
+                        f"Target correlation policy strictly requires pairs in [{target_min:.2f}, {target_max:.2f}]."
+                    )
+                logger.warning(
+                    f"No pairs strictly in target correlation band [{target_min:.2f}, {target_max:.2f}]. "
+                    f"Selecting top {max_pairs} candidate pairs with highest available correlation."
+                )
+                candidates.sort_values(by=corr_col, key=abs, ascending=False, inplace=True)
+                selected = candidates.head(max_pairs).copy()
+        else:
+            if "p_value" in candidates.columns:
+                candidates.sort_values(by="p_value", ascending=True, inplace=True)
+            selected = candidates.head(max_pairs).copy()
+
         selected.reset_index(drop=True, inplace=True)
         return selected

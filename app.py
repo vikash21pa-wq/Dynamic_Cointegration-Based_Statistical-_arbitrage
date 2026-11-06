@@ -423,11 +423,15 @@ async def list_available_pairs():
 
     for item in pairs_list:
         item["active"] = (item["pair"] == engine.pair_name)
+        c_val = abs(float(item.get("correlation", 0)))
+        item["target_corr_match"] = (0.94 <= c_val <= 0.97)
 
     return {
         "current_pair": engine.pair_name,
         "max_active_pairs": 2,
         "selection_limit": 2,
+        "target_correlation_min": 0.94,
+        "target_correlation_max": 0.97,
         "pairs": pairs_list
     }
 

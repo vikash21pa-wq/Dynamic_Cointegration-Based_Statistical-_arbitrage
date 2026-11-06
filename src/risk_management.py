@@ -50,6 +50,17 @@ class RiskManager:
             )
         return True, "OK"
 
+    def validate_pair_correlation(self, corr: float) -> Tuple[bool, str]:
+        """
+        Validates that a pair's correlation falls within the target range [0.94, 0.97].
+        """
+        min_c = getattr(trading_config, "target_correlation_min", 0.94)
+        max_c = getattr(trading_config, "target_correlation_max", 0.97)
+        abs_c = abs(float(corr))
+        if abs_c < min_c or abs_c > max_c:
+            return False, f"Pair correlation {abs_c:.4f} outside policy window [{min_c:.2f}, {max_c:.2f}]."
+        return True, "OK"
+
     def can_open_new_pair(self, current_active_count: int) -> Tuple[bool, str]:
         """
         Validates whether a new pair can be opened or picked without exceeding the 2-pair limit.
