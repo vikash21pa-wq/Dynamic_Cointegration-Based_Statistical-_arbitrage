@@ -2,6 +2,7 @@
 
 [![GitHub Pages Frontend](https://img.shields.io/badge/Live%20Frontend-GitHub%20Pages-06b6d4?style=for-the-badge&logo=react&logoColor=white)](https://vikash21pa-wq.github.io/Dynamic_Cointegration-Based_Statistical-_arbitrage/)
 [![FastAPI Backend](https://img.shields.io/badge/FastAPI-Backend%20API-10b981?style=for-the-badge&logo=fastapi&logoColor=white)](http://localhost:8000)
+[![Oracle Cloud](https://img.shields.io/badge/Deploy-Oracle%20Cloud%20Always--Free-F80000?style=for-the-badge&logo=oracle&logoColor=white)](docs/ORACLE_CLOUD_DEPLOYMENT.md)
 [![Swagger API Docs](https://img.shields.io/badge/API%20Docs-Swagger%20UI-8b5cf6?style=for-the-badge&logo=swagger&logoColor=white)](http://localhost:8000/docs)
 [![Deploy to Render](https://img.shields.io/badge/Deploy%20Backend-Render%20Cloud-black?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/vikash21pa-wq/Dynamic_Cointegration-Based_Statistical-_arbitrage)
 
@@ -116,7 +117,19 @@ BINANCE_API_SECRET=your_secret_key_here
 BINANCE_TESTNET=True
 ```
 
-### 5. Generated Artifacts
+### 5. Oracle Cloud Infrastructure (OCI) 24/7 Free Hosting
+
+You can deploy and run this trading system permanently for free on Oracle Cloud Always-Free Tier (up to 4 OCPUs and 24 GB RAM Ampere A1 ARM compute):
+
+```bash
+# On your Oracle Cloud Ubuntu VM:
+git clone https://github.com/vikash21pa-wq/Dynamic_Cointegration-Based_Statistical-_arbitrage.git
+cd Dynamic_Cointegration-Based_Statistical-_arbitrage
+chmod +x deploy_oci.sh && ./deploy_oci.sh
+```
+See the step-by-step setup guide at **[`docs/ORACLE_CLOUD_DEPLOYMENT.md`](docs/ORACLE_CLOUD_DEPLOYMENT.md)**.
+
+### 6. Generated Artifacts
 Saved in `results/` and `data/processed/`:
 - `experiment_001_summary.json`: Detailed JSON summary comparing M1 and M3
 - `experiment_001_comparison.csv`: Side-by-side performance metrics table

@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  algo-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto-stat-arb-engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "80:8000"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - ACTIVE_EXCHANGE=delta
+      - DELTA_ENVIRONMENT=india
+    volumes:
+      - ./results:/app/results
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # Resource constraints tailored for Oracle Cloud Free Tier (ARM Ampere A1 or AMD Micro)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
