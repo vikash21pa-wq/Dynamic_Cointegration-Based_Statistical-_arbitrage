@@ -77,6 +77,103 @@ class ExecutionEngine:
         else:
             return 0.0, 0.0
 
+    def compute_risk_budgeted_notionals(
+        self,
+        equity: float,
+        beta: float,
+        spread_std: float,
+        position_state: int,
+        risk_budget_pct: float = 0.01,
+        z_entry: float = trading_config.zscore_entry,
+        z_stop: float = trading_config.zscore_emergency_stop,
+        max_allocation_pct: float = trading_config.pair_gross_allocation,
+        max_margin_utilization: float = 0.50
+    ) -> Tuple[float, float, Dict[str, Any]]:
+        """
+        Calculates position sizes according to the Risk-Budget Sizing framework
+        from Section 9 & 17 of the Research Blueprint:
+            Position Size = Risk Budget / Estimated Loss per unit at stop
+        
+        Where:
+            Risk Budget = Equity * risk_budget_pct (default: 1.0% maximum portfolio risk per trade)
+            Estimated Loss at Stop = Delta Z_stop * spread_std + 2-leg round-trip friction
+            Delta Z_stop = abs(z_stop - z_entry)
+            
+        Enforces:
+            1. Risk Budget loss cap (loss at stop <= allowed portfolio risk)
+            2. Gross capital ceiling (gross exposure <= max_allocation_pct * equity)
+            3. Margin utilization cap (locked margin <= max_margin_utilization * equity)
+            4. Beta-neutral leg distribution (N_A + N_B = G, N_A = G / (1 + |beta|))
+        """
+        if position_state == 0 or equity <= 0 or not np.isfinite(beta):
+            return 0.0, 0.0, {}
+
+        abs_beta = max(1e-4, abs(beta))
+
+        # 1. Standard allocation ceiling
+        max_gross_allowed = equity * max_allocation_pct
+
+        # 2. Risk-budget sizing:
+        # Loss at stop per dollar of spread notional:
+        delta_z = max(0.5, abs(z_stop - z_entry))
+        spread_loss_per_unit = (delta_z * max(1e-4, spread_std)) + (2.0 * self.total_cost_pct)
+        risk_budget_dollars = equity * risk_budget_pct
+
+        # Quantity / Gross notional derived from risk budget
+        risk_budget_gross = risk_budget_dollars / spread_loss_per_unit
+
+        # Final gross capital is constrained by the minimum of both bounds
+        gross_capital = min(max_gross_allowed, risk_budget_gross, equity * max_margin_utilization)
+
+        weight_a = 1.0 / (1.0 + abs_beta)
+        weight_b = abs_beta / (1.0 + abs_beta)
+
+        notional_a = gross_capital * weight_a
+        notional_b = gross_capital * weight_b
+
+        # Exposure diagnostics (Section 9)
+        net_notional = notional_a - notional_b
+        beta_adjusted_net = notional_a - (notional_b / abs_beta)
+
+        meta = {
+            "gross_notional": gross_capital,
+            "risk_budget_dollars": risk_budget_dollars,
+            "estimated_loss_at_stop": gross_capital * spread_loss_per_unit,
+            "net_notional": net_notional,
+            "beta_adjusted_net": beta_adjusted_net,
+            "is_risk_budget_constrained": bool(risk_budget_gross < max_gross_allowed)
+        }
+
+        if position_state == 1:
+            return notional_a, -notional_b, meta
+        elif position_state == -1:
+            return -notional_a, notional_b, meta
+        return 0.0, 0.0, meta
+
+    @staticmethod
+    def compute_exposure_diagnostics(
+        notional_a: float,
+        notional_b: float,
+        beta: float
+    ) -> Dict[str, float]:
+        """
+        Calculates joint portfolio exposures as required by Section 9 of the Research Blueprint:
+        - Gross notional: |N_A| + |N_B|
+        - Dollar net notional: N_A + N_B
+        - Beta-adjusted market net exposure: (beta * N_A) + N_B
+        - Market neutrality ratio: |Beta Net| / Gross
+        """
+        gross = abs(notional_a) + abs(notional_b)
+        dollar_net = notional_a + notional_b
+        beta_net = (beta * notional_a) + notional_b
+        neutrality_ratio = (abs(beta_net) / gross) if gross > 0 else 0.0
+        return {
+            "gross_notional": gross,
+            "dollar_net": dollar_net,
+            "beta_adjusted_net": beta_net,
+            "market_neutrality_ratio": neutrality_ratio
+        }
+
     def calculate_turnover_and_costs(
         self,
         prev_notional_a: float,

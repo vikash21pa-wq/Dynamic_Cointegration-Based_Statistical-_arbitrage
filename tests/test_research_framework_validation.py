@@ -221,3 +221,56 @@ def test_seven_research_gates_evaluation():
     assert gates_fail["all_gates_passed"] is False
     assert "statistical_gate" in gates_fail["failed_gates"]
 
+
+def test_risk_budget_position_sizing_and_neutrality():
+    """
+    Confirms Risk-Budget Sizing and Exposure Diagnostics from Section 9 & 17 of the Research Blueprint:
+    1. Quantity = Risk Budget / Estimated Loss at Stop.
+    2. Beta-neutral sizing: N_A = G / (1 + |beta|), N_B = |beta| * G / (1 + |beta|).
+    3. Market neutrality: beta-adjusted net exposure cancels out to ~0.
+    4. Sizing scales down when spread volatility expands.
+    """
+    from src.execution import ExecutionEngine
+
+    exec_engine = ExecutionEngine(fee_pct=0.0005, slippage_pct=0.0002)
+
+    equity = 10000.0
+    beta = 1.25
+
+    # Case A: Low spread volatility (0.005) -> allocation is capped by standard 10% budget ($1,000)
+    notional_a_low, notional_b_low, meta_low = exec_engine.compute_risk_budgeted_notionals(
+        equity=equity,
+        beta=beta,
+        spread_std=0.005,
+        position_state=1,
+        risk_budget_pct=0.01,
+        max_allocation_pct=0.10
+    )
+
+    assert np.isclose(abs(notional_a_low) + abs(notional_b_low), 1000.0)
+    assert meta_low["is_risk_budget_constrained"] is False
+    # Beta-neutrality: notional_a - notional_b / beta == 0
+    assert np.isclose(abs(notional_a_low) - (abs(notional_b_low) / beta), 0.0)
+
+    # Case B: High spread volatility (0.080) -> risk budget (1% = $100) forces gross capital to scale down
+    notional_a_high, notional_b_high, meta_high = exec_engine.compute_risk_budgeted_notionals(
+        equity=equity,
+        beta=beta,
+        spread_std=0.080,
+        position_state=1,
+        risk_budget_pct=0.01,
+        max_allocation_pct=0.10
+    )
+
+    gross_high = abs(notional_a_high) + abs(notional_b_high)
+    assert gross_high < 1000.0  # Scaled down to protect portfolio stop!
+    assert meta_high["is_risk_budget_constrained"] is True
+    # The maximum loss at the emergency stop is strictly <= the $100 risk budget
+    assert meta_high["estimated_loss_at_stop"] <= 100.0001
+
+    # Diagnostics verification
+    diag = ExecutionEngine.compute_exposure_diagnostics(notional_a_low, notional_b_low, beta=beta)
+    assert diag["gross_notional"] == 1000.0
+    assert np.isclose(diag["beta_adjusted_net"], 0.0)
+
+

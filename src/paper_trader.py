@@ -1414,7 +1414,20 @@ class PaperTradingEngine:
             logger.warning(f"[{timestamp_str}] Order rejected: {self.last_rejection_reason}")
             return False
 
-        gross_budget = self.account.cash_balance * self.allocation_pct
+        # Risk-Budget Position Sizing (Research Blueprint Section 9 & 17):
+        # 1. Baseline allocation ceiling (10% of cash balance)
+        alloc_ceiling = self.account.cash_balance * self.allocation_pct
+
+        # 2. Risk-budget constraint (1% portfolio risk budget at emergency stop |Z|=3.5)
+        delta_z = max(0.5, abs(self.emergency_threshold - self.entry_threshold))
+        roundtrip_cost_pct = 2.0 * (self.account.fee_pct + self.account.slippage_pct)
+        spread_loss_per_dollar = (delta_z * max(1e-4, self.rolling_std)) + roundtrip_cost_pct
+        risk_budget_dollars = self.account.cash_balance * 0.01  # 1.0% maximum risk
+        risk_budget_gross = risk_budget_dollars / spread_loss_per_dollar
+
+        # Constrained gross exposure is the tighter of the risk budget and allocation ceiling
+        gross_budget = min(alloc_ceiling, max(trading_config.min_order_notional * 2.5, risk_budget_gross))
+
         notional_a_target = gross_budget / (1.0 + abs(self.beta))
         notional_b_target = (abs(self.beta) * gross_budget) / (1.0 + abs(self.beta))
 
