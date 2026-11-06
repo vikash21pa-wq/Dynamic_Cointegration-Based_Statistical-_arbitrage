@@ -188,6 +188,7 @@ Examples:
     parser.add_argument("--once", action="store_true", help="Process a single market tick, print dashboard, and exit")
     parser.add_argument("--replay", action="store_true", help="Replay recent historical bars to simulate live paper trading")
     parser.add_argument("--live", action="store_true", help="Run live real-time price monitoring and trading")
+    parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds for live monitor (default: 3s)")
     parser.add_argument("--pair", type=str, default=None, help="Trading pair (default: BTCUSD/ETHUSD for Delta, BTCUSDT/ETHUSDT for Binance)")
     parser.add_argument("--capital", type=float, default=10000.0, help="Initial paper trading balance in USD")
     parser.add_argument("--speed", type=float, default=0.03, help="Replay delay per bar in seconds")
@@ -215,7 +216,7 @@ Examples:
     if args.once:
         run_single_tick(engine, api_key=api_key_to_display)
     elif args.live:
-        run_live(engine, api_key=api_key_to_display)
+        run_live(engine, interval=args.interval, api_key=api_key_to_display)
     else:
         # Default to replay / demo mode for immediate testing
         run_replay(engine, speed=args.speed, n_bars=args.bars, api_key=api_key_to_display)
