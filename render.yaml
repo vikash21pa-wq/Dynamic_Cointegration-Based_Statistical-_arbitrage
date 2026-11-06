@@ -4,10 +4,23 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10.12
-      - key: BINANCE_TESTNET
-        value: "true"
+        value: "3.11.1"
+      - key: ACTIVE_EXCHANGE
+        value: delta
+      - key: DEFAULT_PAIR
+        value: "BTCUSD/ETHUSD"
+      - key: TICK_INTERVAL_SECONDS
+        value: "3.0"
+      - key: WORKER_DEFAULT_MODE
+        value: LIVE
+      - key: DELTA_ENVIRONMENT
+        value: india
+      # Set these as Secret vars in Render Dashboard — never commit secrets to git
+      - key: DELTA_API_KEY
+        sync: false
+      - key: DELTA_API_SECRET
+        sync: false

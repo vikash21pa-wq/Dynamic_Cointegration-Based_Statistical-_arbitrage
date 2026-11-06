@@ -35,8 +35,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("crypto_stat_arb")
 
 # Global engine and concurrency primitives
-default_pair = os.getenv("DEFAULT_PAIR", "BTCUSDT/ETHUSDT")
-engine = PaperTradingEngine(pair=default_pair)
+default_pair = os.getenv("DEFAULT_PAIR", delta_config.default_pair if active_exchange == "delta" else "BTCUSDT/ETHUSDT")
+engine = PaperTradingEngine(pair=default_pair, exchange=active_exchange)
 engine_lock: Optional[asyncio.Lock] = None
 
 
@@ -157,9 +157,9 @@ async def lifespan(app: FastAPI):
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         try:
             engine.start_price_stream()
-            logger.info("Binance Futures Multiplex WebSocket stream started.")
+            logger.info(f"{engine.exchange.upper()} Futures Multiplex WebSocket stream started.")
         except Exception as e:
-            logger.warning(f"Could not start Binance multiplex stream: {e}")
+            logger.warning(f"Could not start {engine.exchange.upper()} multiplex stream: {e}")
 
         worker_state["running"] = True
         worker_task = asyncio.create_task(background_trading_worker())
@@ -744,6 +744,12 @@ async def reset_portfolio():
 
     await broadcast_ws_tick(snapshot)
     return snapshot
+
+
+@app.get("/ping", tags=["Keepalive"])
+async def ping():
+    """Render free-tier keepalive — hit every 10 min via external cron to prevent sleep."""
+    return {"pong": True, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 def start():
