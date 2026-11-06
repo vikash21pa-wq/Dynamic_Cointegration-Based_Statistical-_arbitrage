@@ -123,12 +123,18 @@ def run_experiment(
     exchange: str = active_exchange,
     capital: Optional[float] = None,
     allocation: Optional[float] = None,
+    max_pairs: int = 2,
     export_results: bool = True,
     quiet: bool = False
 ) -> Dict[str, Any]:
     """
     Executes the quantitative statistical arbitrage research pipeline.
     """
+    if max_pairs > 2:
+        raise ValueError(
+            f"Validation Error: Cannot pick more than 2 pairs at once (requested: {max_pairs}). "
+            f"Portfolio statistical risk policy strictly enforces a maximum of 2 pairs."
+        )
     logger = setup_logger(quiet=quiet)
 
     from src.data_loader import BinanceFuturesDataLoader, DeltaExchangeDataLoader, generate_synthetic_futures_data
@@ -268,7 +274,14 @@ def run_experiment(
             lookback_bars=min(len(aligned_log), selection_config.training_bars)
         )
         eligible_pairs = screening_results[screening_results["eligible"] == True]
-        target_pair = eligible_pairs.iloc[0] if not eligible_pairs.empty else screening_results.iloc[0]
+
+        # STAGE 3.1: Enforce Pair Selection Constraint (Never pick more than 2 pairs at once)
+        selected_pairs_df = pair_engine.select_pairs(screening_results, max_pairs=min(max_pairs, 2))
+        target_pair = selected_pairs_df.iloc[0] if not selected_pairs_df.empty else (
+            eligible_pairs.iloc[0] if not eligible_pairs.empty else screening_results.iloc[0]
+        )
+        picked_names = selected_pairs_df["pair"].tolist() if not selected_pairs_df.empty else [target_pair["pair"]]
+        logger.info(f"Picked candidate pair(s) (validated <= 2 at once): {picked_names}")
 
     logger.info(f"Screening complete: {len(screening_results)} pairs tested, {len(eligible_pairs)} passed all statistical filters.")
 
@@ -448,6 +461,8 @@ Examples:
                         help="Initial portfolio capital in USD (default: $10,000)")
     parser.add_argument("--allocation", type=float, default=None,
                         help="Gross notional capital allocation fraction per pair (default: 0.10)")
+    parser.add_argument("--max-pairs", type=int, default=2,
+                        help="Maximum pairs to pick/select simultaneously (validation limit: strictly <= 2, default: 2)")
     parser.add_argument("--screen-only", action="store_true",
                         help="Perform universe cointegration screening only")
     parser.add_argument("--synthetic", action="store_true",
@@ -473,6 +488,7 @@ Examples:
         exchange=args.exchange,
         capital=args.capital,
         allocation=args.allocation,
+        max_pairs=args.max_pairs,
         quiet=args.quiet
     )
 

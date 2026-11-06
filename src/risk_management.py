@@ -24,9 +24,43 @@ class RiskManager:
         spread_vol_expansion_factor: float = 2.5
     ):
         self.max_portfolio_drawdown = max_portfolio_drawdown
-        self.max_active_pairs = max_active_pairs
+        self.max_active_pairs = min(max_active_pairs, trading_config.max_active_pairs)
         self.coint_pvalue_breakdown = coint_pvalue_breakdown
         self.spread_vol_expansion_factor = spread_vol_expansion_factor
+
+    def validate_active_pairs(self, active_pairs: Any) -> Tuple[bool, str]:
+        """
+        Validates that the number of active pairs does not exceed the strict limit of 2 pairs.
+        Returns:
+            (is_valid, message)
+        """
+        if isinstance(active_pairs, (list, tuple, set, dict)):
+            count = len(active_pairs)
+        else:
+            try:
+                count = int(active_pairs)
+            except (TypeError, ValueError):
+                count = 1
+
+        if count > self.max_active_pairs:
+            return (
+                False,
+                f"Risk Validation Breach: Cannot pick or trade {count} active pairs simultaneously. "
+                f"Maximum allowed limit is {self.max_active_pairs} pairs at once."
+            )
+        return True, "OK"
+
+    def can_open_new_pair(self, current_active_count: int) -> Tuple[bool, str]:
+        """
+        Validates whether a new pair can be opened or picked without exceeding the 2-pair limit.
+        """
+        if current_active_count >= self.max_active_pairs:
+            return (
+                False,
+                f"Cannot pick or open new pair: currently {current_active_count} active pairs open. "
+                f"Hard ceiling is {self.max_active_pairs} pairs at once."
+            )
+        return True, "OK"
 
     def check_portfolio_drawdown(self, equity_curve: pd.Series) -> Tuple[bool, float]:
         """

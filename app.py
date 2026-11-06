@@ -424,7 +424,12 @@ async def list_available_pairs():
     for item in pairs_list:
         item["active"] = (item["pair"] == engine.pair_name)
 
-    return {"current_pair": engine.pair_name, "pairs": pairs_list}
+    return {
+        "current_pair": engine.pair_name,
+        "max_active_pairs": 2,
+        "selection_limit": 2,
+        "pairs": pairs_list
+    }
 
 
 @app.post("/api/pair")
@@ -432,8 +437,19 @@ async def switch_trading_pair(payload: Dict[str, Any]):
     """
     Switches active trading engine pair (e.g. SOLUSDT/AVAXUSDT, ADAUSDT/DOTUSDT).
     Reconfigures market parameters, reboots price stream, and pushes updated state.
+    Enforces validation: never pick or select more than 2 pairs at once.
     """
     global step_index, latest_snapshot
+
+    # Validate multi-pair requests if supplied
+    requested_pairs = payload.get("pairs")
+    if requested_pairs is not None:
+        if isinstance(requested_pairs, (list, tuple)) and len(requested_pairs) > 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Validation Error: Cannot pick more than 2 pairs at once (requested {len(requested_pairs)} pairs). Maximum allowed is 2."
+            )
+
     pair = payload.get("pair")
     if not pair or not isinstance(pair, str) or "/" not in pair:
         raise HTTPException(

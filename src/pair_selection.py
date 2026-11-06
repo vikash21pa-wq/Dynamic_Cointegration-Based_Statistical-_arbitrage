@@ -238,3 +238,56 @@ class PairSelectionEngine:
         logger.info(f"Screening complete. Total pairs tested: {len(df_results)}. Eligible pairs: {df_results['eligible'].sum()}. Results saved to {output_path}")
 
         return df_results
+
+    @staticmethod
+    def validate_pair_count(pairs: Any) -> int:
+        """
+        Validates that no more than 2 pairs are ever picked or selected at once.
+        Raises ValueError if the count exceeds 2.
+        """
+        if isinstance(pairs, int):
+            count = pairs
+        elif isinstance(pairs, (list, tuple, set)):
+            count = len(pairs)
+        elif isinstance(pairs, pd.DataFrame):
+            count = len(pairs)
+        else:
+            try:
+                count = int(pairs)
+            except (TypeError, ValueError):
+                count = 1
+
+        if count > selection_config.max_selected_pairs:
+            raise ValueError(
+                f"Validation Error: Cannot pick more than {selection_config.max_selected_pairs} pairs at once (requested {count}). "
+                f"Portfolio statistical risk policy strictly restricts concurrent pair selection to a maximum of 2 pairs."
+            )
+        return count
+
+    def select_pairs(
+        self,
+        df_results: pd.DataFrame,
+        max_pairs: int = selection_config.max_selected_pairs
+    ) -> pd.DataFrame:
+        """
+        Picks the top cointegrated candidate pairs subject to a strict 2-pair validation ceiling.
+        Raises ValueError if max_pairs > 2.
+        """
+        self.validate_pair_count(max_pairs)
+
+        if df_results.empty:
+            return pd.DataFrame()
+
+        # Prioritize statistically eligible pairs
+        if "eligible" in df_results.columns and df_results["eligible"].any():
+            candidates = df_results[df_results["eligible"] == True].copy()
+        else:
+            candidates = df_results.copy()
+
+        # Sort by cointegration strength (lowest p-value / highest absolute t-stat)
+        if "p_value" in candidates.columns:
+            candidates.sort_values(by="p_value", ascending=True, inplace=True)
+
+        selected = candidates.head(max_pairs).copy()
+        selected.reset_index(drop=True, inplace=True)
+        return selected
