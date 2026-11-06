@@ -125,14 +125,17 @@ def test_api_pair_selection_validation():
     """Confirms Web API rejects multi-pair payloads exceeding 2 pairs and advertises limit."""
     client = TestClient(app)
 
-    # 1. GET /api/pairs exposes max_active_pairs=2, selection_limit=2, and correlation targets
+    # 1. GET /api/pairs exposes max_active_pairs=2, selection_limit=2, and correlation & spread targets
     res_pairs = client.get("/api/pairs")
     assert res_pairs.status_code == 200
     data_pairs = res_pairs.json()
     assert data_pairs["max_active_pairs"] == 2
     assert data_pairs["selection_limit"] == 2
-    assert data_pairs["target_correlation_min"] == 0.94
+    assert data_pairs["target_correlation_min"] == 0.89
     assert data_pairs["target_correlation_max"] == 0.97
+    assert data_pairs["min_spread_std"] == 0.0020
+    assert data_pairs["max_spread_std"] == 0.1500
+    assert data_pairs["max_half_life_hours"] == 36.0
 
     # 2. POST /api/pair with > 2 pairs is rejected with HTTP 400
     invalid_payload = {
@@ -145,19 +148,19 @@ def test_api_pair_selection_validation():
 
 
 def test_pair_selection_engine_validate_pair_correlation():
-    """Confirms validate_pair_correlation validates the [0.94, 0.97] band."""
-    valid, msg = PairSelectionEngine.validate_pair_correlation(0.95)
+    """Confirms validate_pair_correlation validates the [0.89, 0.97] band."""
+    valid, msg = PairSelectionEngine.validate_pair_correlation(0.93)
     assert valid is True
     assert msg == "OK"
 
-    valid_edge_low, _ = PairSelectionEngine.validate_pair_correlation(0.94)
+    valid_edge_low, _ = PairSelectionEngine.validate_pair_correlation(0.89)
     assert valid_edge_low is True
 
     valid_edge_high, _ = PairSelectionEngine.validate_pair_correlation(0.97)
     assert valid_edge_high is True
 
-    # Below 0.94 must fail
-    invalid_low, msg_low = PairSelectionEngine.validate_pair_correlation(0.93)
+    # Below 0.89 must fail
+    invalid_low, msg_low = PairSelectionEngine.validate_pair_correlation(0.88)
     assert invalid_low is False
     assert "outside required target range" in msg_low
 
@@ -167,18 +170,56 @@ def test_pair_selection_engine_validate_pair_correlation():
     assert "outside required target range" in msg_high
 
 
+def test_pair_selection_engine_validate_spread_quality():
+    """Confirms validate_spread_quality verifies volatility floor, ceiling, half-life, and p-value."""
+    # Healthy spread
+    ok, msg = PairSelectionEngine.validate_spread_quality(
+        spread_std=0.015, half_life_hours=4.5, p_value=0.005
+    )
+    assert ok is True
+    assert msg == "GOOD_SPREAD"
+
+    # Spread std too low (< 0.0020 or 0.20%)
+    too_low_std, msg_low = PairSelectionEngine.validate_spread_quality(
+        spread_std=0.0010, half_life_hours=3.0, p_value=0.005
+    )
+    assert too_low_std is False
+    assert "Spread volatility too low" in msg_low
+
+    # Spread std too high (> 0.1500 or 15%)
+    too_high_std, msg_high = PairSelectionEngine.validate_spread_quality(
+        spread_std=0.1800, half_life_hours=3.0, p_value=0.005
+    )
+    assert too_high_std is False
+    assert "Spread volatility too high" in msg_high
+
+    # Half life too slow (> 36 hours)
+    slow_hl, msg_hl = PairSelectionEngine.validate_spread_quality(
+        spread_std=0.020, half_life_hours=48.0, p_value=0.005
+    )
+    assert slow_hl is False
+    assert "half-life too slow" in msg_hl
+
+    # Non-stationary / p-value failure (>= 0.05)
+    bad_p, msg_p = PairSelectionEngine.validate_spread_quality(
+        spread_std=0.020, half_life_hours=5.0, p_value=0.080
+    )
+    assert bad_p is False
+    assert "Cointegration p-value" in msg_p
+
+
 def test_pair_selection_engine_select_pairs_target_correlation_range():
     """
-    Confirms select_pairs prioritizes candidate pairs strictly within [0.94, 0.97]
-    and picks at most 2 with the highest correlation.
+    Confirms select_pairs prioritizes candidate pairs strictly within [0.89, 0.97]
+    and picks at most 2 with the highest correlation, favoring good spread quality.
     """
     engine = PairSelectionEngine()
     mock_df = pd.DataFrame([
-        {"pair": "PAIR_TOO_HIGH", "correlation": 0.99, "p_value": 0.0001, "eligible": True},
-        {"pair": "PAIR_BEST", "correlation": 0.965, "p_value": 0.0010, "eligible": True},
-        {"pair": "PAIR_SECOND_BEST", "correlation": 0.955, "p_value": 0.0015, "eligible": True},
-        {"pair": "PAIR_THIRD_BEST", "correlation": 0.942, "p_value": 0.0020, "eligible": True},
-        {"pair": "PAIR_TOO_LOW", "correlation": 0.880, "p_value": 0.0005, "eligible": True},
+        {"pair": "PAIR_TOO_HIGH", "correlation": 0.99, "good_spread": True, "p_value": 0.0001, "eligible": True},
+        {"pair": "PAIR_BEST", "correlation": 0.965, "good_spread": True, "p_value": 0.0010, "eligible": True},
+        {"pair": "PAIR_SECOND_BEST", "correlation": 0.915, "good_spread": True, "p_value": 0.0015, "eligible": True},
+        {"pair": "PAIR_THIRD_BEST", "correlation": 0.895, "good_spread": True, "p_value": 0.0020, "eligible": True},
+        {"pair": "PAIR_TOO_LOW", "correlation": 0.850, "good_spread": True, "p_value": 0.0005, "eligible": True},
     ])
 
     selected = engine.select_pairs(mock_df, max_pairs=2)
@@ -186,11 +227,26 @@ def test_pair_selection_engine_select_pairs_target_correlation_range():
     assert selected.iloc[0]["pair"] == "PAIR_BEST"
     assert selected.iloc[0]["correlation"] == 0.965
     assert selected.iloc[1]["pair"] == "PAIR_SECOND_BEST"
-    assert selected.iloc[1]["correlation"] == 0.955
+    assert selected.iloc[1]["correlation"] == 0.915
+
+
+def test_pair_selection_engine_select_pairs_favors_good_spread():
+    """Confirms select_pairs prioritizes pairs with good_spread=True over pairs without good spread."""
+    engine = PairSelectionEngine()
+    mock_df = pd.DataFrame([
+        {"pair": "PAIR_BAD_SPREAD_HIGH_CORR", "correlation": 0.96, "good_spread": False, "p_value": 0.001, "eligible": True},
+        {"pair": "PAIR_GOOD_SPREAD_1", "correlation": 0.94, "good_spread": True, "p_value": 0.002, "eligible": True},
+        {"pair": "PAIR_GOOD_SPREAD_2", "correlation": 0.91, "good_spread": True, "p_value": 0.003, "eligible": True},
+    ])
+
+    selected = engine.select_pairs(mock_df, max_pairs=2)
+    assert len(selected) == 2
+    assert selected.iloc[0]["pair"] == "PAIR_GOOD_SPREAD_1"
+    assert selected.iloc[1]["pair"] == "PAIR_GOOD_SPREAD_2"
 
 
 def test_pair_selection_engine_strict_correlation_rejection():
-    """Confirms select_pairs raises ValueError when strict=True and no pair matches [0.94, 0.97]."""
+    """Confirms select_pairs raises ValueError when strict=True and no pair matches [0.89, 0.97]."""
     engine = PairSelectionEngine()
     low_corr_df = pd.DataFrame([
         {"pair": "LOW_A", "correlation": 0.85, "p_value": 0.001, "eligible": True},
@@ -201,10 +257,10 @@ def test_pair_selection_engine_strict_correlation_rejection():
         engine.select_pairs(low_corr_df, strict_correlation=True)
 
 
-def test_risk_manager_correlation_validation():
-    """Confirms RiskManager validate_pair_correlation checks [0.94, 0.97]."""
+def test_risk_manager_correlation_and_spread_validation():
+    """Confirms RiskManager validate_pair_correlation and validate_spread_quality."""
     rm = RiskManager()
-    valid_ok, _ = rm.validate_pair_correlation(0.95)
+    valid_ok, _ = rm.validate_pair_correlation(0.92)
     assert valid_ok is True
 
     valid_low, msg_low = rm.validate_pair_correlation(0.85)
@@ -214,5 +270,13 @@ def test_risk_manager_correlation_validation():
     valid_high, msg_high = rm.validate_pair_correlation(0.99)
     assert valid_high is False
     assert "outside policy window" in msg_high
+
+    # Spread quality check
+    spread_ok, _ = rm.validate_spread_quality(0.015, 6.0, 0.01)
+    assert spread_ok is True
+
+    spread_bad_vol, msg_bad_vol = rm.validate_spread_quality(0.0005, 6.0, 0.01)
+    assert spread_bad_vol is False
+    assert "Spread volatility too low" in msg_bad_vol
 
 

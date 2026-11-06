@@ -107,8 +107,11 @@ class PairSelectionEngine:
         self.fdr_alpha = fdr_alpha
         self.require_positive_beta = require_positive_beta
         self.max_half_life_bars = max_half_life_bars
-        self.target_correlation_min = getattr(selection_config, "target_correlation_min", 0.94)
+        self.target_correlation_min = getattr(selection_config, "target_correlation_min", 0.89)
         self.target_correlation_max = getattr(selection_config, "target_correlation_max", 0.97)
+        self.min_spread_std = getattr(selection_config, "min_spread_std", 0.0020)
+        self.max_spread_std = getattr(selection_config, "max_spread_std", 0.1500)
+        self.max_half_life_hours = getattr(selection_config, "max_half_life_hours", 36.0)
         self.processed_dir = Path(processed_dir)
 
     def analyze_pair(
@@ -229,10 +232,23 @@ class PairSelectionEngine:
         beta_pass = df_results["beta"] > 0 if self.require_positive_beta else True
         hl_pass = (df_results["half_life_bars"] > 1.0) & (df_results["half_life_bars"] <= self.max_half_life_bars)
 
+        # Spread quality verification:
+        # 1. Volatility floor (>= 0.20%) to cover 2-leg round-trip taker fees & slippage
+        # 2. Volatility ceiling (<= 15.0%) to avoid structural regime break divergence
+        # 3. Finite, timely half-life (0 < half_life <= 36 hours)
+        # 4. Cointegration stationarity (p_value < alpha)
+        df_results["good_spread"] = (
+            (df_results["spread_std"] >= self.min_spread_std) &
+            (df_results["spread_std"] <= self.max_spread_std) &
+            (df_results["half_life_hours"] > 0) &
+            (df_results["half_life_hours"] <= self.max_half_life_hours) &
+            (df_results["p_value"] < self.coint_alpha)
+        )
+
         df_results["eligible"] = corr_pass & coint_pass & beta_pass & hl_pass
 
-        # Sort primarily by eligible (descending), then p-value (ascending)
-        df_results.sort_values(by=["eligible", "p_value"], ascending=[False, True], inplace=True)
+        # Sort primarily by good_spread & eligible (descending), then p-value (ascending)
+        df_results.sort_values(by=["good_spread", "eligible", "p_value"], ascending=[False, False, True], inplace=True)
         df_results.reset_index(drop=True, inplace=True)
 
         output_path = self.processed_dir / "pair_screening_results.csv"
@@ -273,7 +289,7 @@ class PairSelectionEngine:
         max_corr: float = selection_config.target_correlation_max
     ) -> Tuple[bool, str]:
         """
-        Validates that a pair's correlation falls within the target high-correlation band [0.94, 0.97].
+        Validates that a pair's correlation falls within the target high-correlation band [0.89, 0.97].
         """
         abs_corr = abs(float(corr))
         if abs_corr < min_corr or abs_corr > max_corr:
@@ -282,6 +298,53 @@ class PairSelectionEngine:
                 f"Correlation {abs_corr:.4f} outside required target range [{min_corr:.2f}, {max_corr:.2f}]."
             )
         return True, "OK"
+
+    @staticmethod
+    def validate_spread_quality(
+        spread_std: float,
+        half_life_hours: float,
+        p_value: float = 0.01,
+        min_spread_std: float = selection_config.min_spread_std,
+        max_spread_std: float = selection_config.max_spread_std,
+        max_half_life_hours: float = selection_config.max_half_life_hours,
+        coint_alpha: float = selection_config.cointegration_alpha,
+    ) -> Tuple[bool, str]:
+        """
+        Validates whether the spread between two cryptocurrency assets demonstrates high-quality mean reversion:
+        1. Volatility floor (spread_std >= 0.0020 or 0.20%): Ensures sufficient price oscillation amplitude
+           to overcome two-leg round-trip taker trading fees and execution slippage.
+        2. Volatility ceiling (spread_std <= 0.1500 or 15.0%): Screens out diverged or structurally broken pairs.
+        3. Mean-reversion speed (0 < half_life_hours <= 36.0h): Guarantees timely trade exit and convergence.
+        4. Cointegration stationarity (p_value < coint_alpha, default 0.05): Verifies residual stationarity.
+        """
+        if np.isnan(spread_std) or np.isinf(spread_std) or spread_std < min_spread_std:
+            return (
+                False,
+                f"Spread volatility too low ({spread_std:.5f} < {min_spread_std:.4f}); "
+                f"signals will not overcome round-trip exchange fees."
+            )
+        if spread_std > max_spread_std:
+            return (
+                False,
+                f"Spread volatility too high ({spread_std:.4f} > {max_spread_std:.4f}); "
+                f"pair exhibits structural divergence."
+            )
+        if np.isnan(half_life_hours) or np.isinf(half_life_hours) or half_life_hours <= 0:
+            return (
+                False,
+                f"Invalid or non-mean-reverting half-life ({half_life_hours})."
+            )
+        if half_life_hours > max_half_life_hours:
+            return (
+                False,
+                f"Mean reversion half-life too slow ({half_life_hours:.1f}h > {max_half_life_hours:.1f}h)."
+            )
+        if p_value >= coint_alpha:
+            return (
+                False,
+                f"Cointegration p-value ({p_value:.4f}) does not meet stationarity threshold (< {coint_alpha:.2f})."
+            )
+        return True, "GOOD_SPREAD"
 
     def select_pairs(
         self,
@@ -292,10 +355,11 @@ class PairSelectionEngine:
         strict_correlation: bool = False
     ) -> pd.DataFrame:
         """
-        Picks at most 2 candidate pairs, strictly prioritizing the highest correlation within the target range [0.94, 0.97]:
+        Picks at most 2 candidate pairs, strictly prioritizing the highest correlation within the target range [0.89, 0.97]
+        and confirming good spread quality:
         1. Enforces max_pairs <= 2.
-        2. Filters candidate pairs with correlation between min_corr (0.94) and max_corr (0.97).
-        3. If pairs exist in that target range, selects the top <=2 pairs with the highest correlation (descending).
+        2. Filters candidate pairs with correlation between min_corr (0.89) and max_corr (0.97).
+        3. Prioritizes pairs with good_spread == True, then ranks by highest correlation descending.
         4. If strict_correlation=True and no pairs match, raises ValueError.
         5. If strict_correlation=False and no pairs fall in [min_corr, max_corr], falls back to highest correlation available.
         """
@@ -316,20 +380,14 @@ class PairSelectionEngine:
         corr_col = "correlation" if "correlation" in candidates.columns else None
 
         if corr_col:
-            # 1. Check for pairs strictly within [0.94, 0.97]
+            # 1. Check for pairs strictly within [0.89, 0.97]
             in_band = candidates[
                 (candidates[corr_col].abs() >= target_min) &
                 (candidates[corr_col].abs() <= target_max)
             ].copy()
 
             if not in_band.empty:
-                # Rank by highest correlation descending
-                in_band.sort_values(by=corr_col, key=abs, ascending=False, inplace=True)
-                selected = in_band.head(max_pairs).copy()
-                logger.info(
-                    f"Selected {len(selected)} pair(s) in target correlation band [{target_min:.2f}, {target_max:.2f}]: "
-                    f"{selected['pair'].tolist() if 'pair' in selected.columns else []}"
-                )
+                pool = in_band
             else:
                 if strict_correlation:
                     raise ValueError(
@@ -340,8 +398,21 @@ class PairSelectionEngine:
                     f"No pairs strictly in target correlation band [{target_min:.2f}, {target_max:.2f}]. "
                     f"Selecting top {max_pairs} candidate pairs with highest available correlation."
                 )
-                candidates.sort_values(by=corr_col, key=abs, ascending=False, inplace=True)
-                selected = candidates.head(max_pairs).copy()
+                pool = candidates
+
+            # Rank prioritizing good_spread (if present), then highest absolute correlation descending
+            pool = pool.copy()
+            pool["_abs_corr"] = pool[corr_col].abs()
+            sort_cols = ["good_spread", "_abs_corr"] if "good_spread" in pool.columns else ["_abs_corr"]
+            sort_asc = [False, False] if "good_spread" in pool.columns else [False]
+            pool.sort_values(by=sort_cols, ascending=sort_asc, inplace=True)
+            pool.drop(columns=["_abs_corr"], inplace=True)
+
+            selected = pool.head(max_pairs).copy()
+            logger.info(
+                f"Selected {len(selected)} pair(s) (target corr [{target_min:.2f}, {target_max:.2f}]): "
+                f"{selected['pair'].tolist() if 'pair' in selected.columns else []}"
+            )
         else:
             if "p_value" in candidates.columns:
                 candidates.sort_values(by="p_value", ascending=True, inplace=True)

@@ -60,8 +60,11 @@ class SelectionConfig:
 
     # Screening criteria
     min_correlation: float = 0.70  # Baseline correlation threshold
-    target_correlation_min: float = 0.94  # Strict target correlation minimum (0.94 - 0.97)
-    target_correlation_max: float = 0.97  # Strict target correlation maximum (0.94 - 0.97)
+    target_correlation_min: float = 0.89  # Strict target correlation minimum (0.89 - 0.97)
+    target_correlation_max: float = 0.97  # Strict target correlation maximum (0.89 - 0.97)
+    min_spread_std: float = 0.0020  # Minimum spread volatility (0.20%) to overcome 2-leg round-trip fees
+    max_spread_std: float = 0.1500  # Maximum spread volatility (15%) to prevent regime break divergence
+    max_half_life_hours: float = 36.0  # Good spread must mean-revert within 36 hours (Ornstein-Uhlenbeck)
     cointegration_alpha: float = 0.05  # Raw p-value threshold
     fdr_alpha: float = 0.10  # Benjamini-Hochberg False Discovery Rate threshold
     require_positive_beta: bool = True
@@ -76,8 +79,9 @@ class TradingConfig:
     leverage: float = 1.0
     maintenance_margin_pct: float = 0.05  # 5% maintenance margin rate for perpetual futures
     max_active_pairs: int = 2  # Hard validation ceiling: strictly at most 2 active pairs concurrently
-    target_correlation_min: float = 0.94
+    target_correlation_min: float = 0.89
     target_correlation_max: float = 0.97
+    min_spread_std: float = 0.0020
     pair_gross_allocation: float = 0.10  # 10% of portfolio equity per active pair
     max_portfolio_drawdown: float = 0.10  # 10% portfolio drawdown circuit breaker
 

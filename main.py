@@ -471,7 +471,7 @@ Examples:
     parser.add_argument("--max-pairs", type=int, default=2,
                         help="Maximum pairs to pick/select simultaneously (validation limit: strictly <= 2, default: 2)")
     parser.add_argument("--min-corr", type=float, default=selection_config.target_correlation_min,
-                        help="Minimum target correlation for pair selection (default: 0.94)")
+                        help="Minimum target correlation for pair selection (default: 0.89)")
     parser.add_argument("--max-corr", type=float, default=selection_config.target_correlation_max,
                         help="Maximum target correlation for pair selection (default: 0.97)")
     parser.add_argument("--screen-only", action="store_true",

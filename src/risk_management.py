@@ -52,14 +52,44 @@ class RiskManager:
 
     def validate_pair_correlation(self, corr: float) -> Tuple[bool, str]:
         """
-        Validates that a pair's correlation falls within the target range [0.94, 0.97].
+        Validates that a pair's correlation falls within the target range [0.89, 0.97].
         """
-        min_c = getattr(trading_config, "target_correlation_min", 0.94)
+        min_c = getattr(trading_config, "target_correlation_min", 0.89)
         max_c = getattr(trading_config, "target_correlation_max", 0.97)
         abs_c = abs(float(corr))
         if abs_c < min_c or abs_c > max_c:
             return False, f"Pair correlation {abs_c:.4f} outside policy window [{min_c:.2f}, {max_c:.2f}]."
         return True, "OK"
+
+    def validate_spread_quality(
+        self,
+        spread_std: float,
+        half_life_hours: float,
+        p_value: float = 0.01
+    ) -> Tuple[bool, str]:
+        """
+        Validates spread quality between pair assets:
+        1. Volatility floor (>= 0.0020 or 0.20%) to guarantee edge exceeds round-trip fee friction.
+        2. Volatility ceiling (<= 0.1500 or 15.0%) to prevent trading in diverging/exploding spreads.
+        3. Finite mean-reversion speed (0 < half_life_hours <= 36.0h).
+        4. Cointegration stationarity (p_value < 0.05).
+        """
+        min_std = getattr(trading_config, "min_spread_std", 0.0020)
+        max_std = getattr(selection_config, "max_spread_std", 0.1500)
+        max_hl = getattr(selection_config, "max_half_life_hours", 36.0)
+        coint_alpha = getattr(selection_config, "cointegration_alpha", 0.05)
+
+        if np.isnan(spread_std) or np.isinf(spread_std) or spread_std < min_std:
+            return False, f"Spread volatility too low ({spread_std:.5f} < {min_std:.4f}); insufficient to cover friction."
+        if spread_std > max_std:
+            return False, f"Spread volatility too high ({spread_std:.4f} > {max_std:.4f}); structural instability."
+        if np.isnan(half_life_hours) or np.isinf(half_life_hours) or half_life_hours <= 0:
+            return False, f"Invalid or non-reverting half-life ({half_life_hours})."
+        if half_life_hours > max_hl:
+            return False, f"Half-life too slow ({half_life_hours:.1f}h > {max_hl:.1f}h)."
+        if p_value >= coint_alpha:
+            return False, f"Cointegration p-value ({p_value:.4f}) does not meet stationarity threshold (< {coint_alpha:.2f})."
+        return True, "GOOD_SPREAD"
 
     def can_open_new_pair(self, current_active_count: int) -> Tuple[bool, str]:
         """

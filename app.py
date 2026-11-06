@@ -424,14 +424,26 @@ async def list_available_pairs():
     for item in pairs_list:
         item["active"] = (item["pair"] == engine.pair_name)
         c_val = abs(float(item.get("correlation", 0)))
-        item["target_corr_match"] = (0.94 <= c_val <= 0.97)
+        item["target_corr_match"] = (0.89 <= c_val <= 0.97)
+        if "good_spread" not in item:
+            # Evaluate good spread criteria
+            s_std = float(item.get("spread_std", 0.015))
+            hl_str = str(item.get("half_life_hours", "2.0h")).replace("h", "")
+            try:
+                hl_h = float(hl_str)
+            except ValueError:
+                hl_h = 2.0
+            item["good_spread"] = (0.0020 <= s_std <= 0.1500) and (0 < hl_h <= 36.0)
 
     return {
         "current_pair": engine.pair_name,
         "max_active_pairs": 2,
         "selection_limit": 2,
-        "target_correlation_min": 0.94,
+        "target_correlation_min": 0.89,
         "target_correlation_max": 0.97,
+        "min_spread_std": 0.0020,
+        "max_spread_std": 0.1500,
+        "max_half_life_hours": 36.0,
         "pairs": pairs_list
     }
 
