@@ -67,20 +67,38 @@ class PerformanceAnalyzer:
         # Calmar Ratio
         calmar = (ann_return / abs(max_drawdown)) if abs(max_drawdown) > 1e-6 else 0.0
 
-        # Trade analytics
+        # Trade analytics & Expectancy (Section 8 & 17 of Research Blueprint)
         total_trades = len(trades_df) if trades_df is not None and not trades_df.empty else 0
         win_rate = 0.0
+        loss_rate = 0.0
         profit_factor = 0.0
         avg_trade_pnl = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+        payoff_ratio = 0.0
+        trade_expectancy = 0.0
         avg_holding_bars = 0.0
 
         if total_trades > 0 and "pnl" in trades_df.columns:
             wins = trades_df[trades_df["pnl"] > 0]
             losses = trades_df[trades_df["pnl"] < 0]
-            win_rate = len(wins) / total_trades
+            n_wins = len(wins)
+            n_losses = len(losses)
+            win_rate = n_wins / total_trades
+            loss_rate = n_losses / total_trades
+
             gross_profit = float(wins["pnl"].sum())
             gross_loss = float(abs(losses["pnl"].sum()))
             profit_factor = (gross_profit / gross_loss) if gross_loss > 1e-6 else (np.inf if gross_profit > 0 else 0.0)
+
+            avg_win = float(wins["pnl"].mean()) if n_wins > 0 else 0.0
+            avg_loss = float(abs(losses["pnl"].mean())) if n_losses > 0 else 0.0
+            payoff_ratio = (avg_win / avg_loss) if avg_loss > 1e-6 else (np.inf if avg_win > 0 else 0.0)
+
+            # Net Trade Expectancy: EV = P(win) * avg_win - P(loss) * avg_loss - cost_per_trade
+            cost_per_trade = (total_costs / total_trades) if total_trades > 0 else 0.0
+            trade_expectancy = (win_rate * avg_win) - (loss_rate * avg_loss) - cost_per_trade
+
             avg_trade_pnl = float(trades_df["pnl"].mean())
             if "holding_bars" in trades_df.columns:
                 avg_holding_bars = float(trades_df["holding_bars"].mean())
@@ -98,7 +116,11 @@ class PerformanceAnalyzer:
             "total_trades_completed": total_trades,
             "win_rate_pct": win_rate * 100.0,
             "profit_factor": float(profit_factor),
+            "payoff_ratio": float(payoff_ratio),
+            "trade_expectancy": float(trade_expectancy),
             "avg_trade_pnl": avg_trade_pnl,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
             "avg_holding_bars": avg_holding_bars,
             "avg_holding_hours": avg_holding_bars * 5.0 / 60.0,
             "total_costs_paid": total_costs,

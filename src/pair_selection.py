@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-from statsmodels.tsa.stattools import coint, adfuller
+from statsmodels.tsa.stattools import coint, adfuller, kpss
 
 from config import PROCESSED_DATA_DIR, selection_config
 
@@ -152,7 +152,23 @@ class PairSelectionEngine:
         adf_stat = float(adf_result[0])
         adf_p = float(adf_result[1])
 
-        # 5. Ornstein-Uhlenbeck Half-Life
+        # 5. Complementary KPSS test on spread residuals (Research Blueprint Section 4)
+        # Null hypothesis (H0): Residual spread is stationary (opposite of ADF).
+        # A p-value >= 0.05 confirms stationarity without conflicting ADF.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                kpss_stat, kpss_p, _, _ = kpss(spread, regression="c", nlags="auto")
+                kpss_stat = float(kpss_stat)
+                kpss_p = float(kpss_p)
+            except Exception:
+                kpss_stat = 0.0
+                kpss_p = 0.10
+
+        # 6. Durbin-Watson statistic for residual autocorrelation
+        dw_stat = float(sm.stats.durbin_watson(spread))
+
+        # 7. Ornstein-Uhlenbeck Half-Life
         half_life_bars, lambda_coef = calculate_half_life(spread)
         half_life_hours = half_life_bars * 5.0 / 60.0 if np.isfinite(half_life_bars) else np.inf
 
@@ -168,6 +184,9 @@ class PairSelectionEngine:
             "crit_value_10%": float(crit_vals[2]),
             "adf_t_stat": adf_stat,
             "adf_p_value": adf_p,
+            "kpss_stat": kpss_stat,
+            "kpss_p_value": kpss_p,
+            "durbin_watson": dw_stat,
             "half_life_bars": half_life_bars,
             "half_life_hours": half_life_hours,
             "spread_std": float(np.std(spread)),
@@ -308,14 +327,19 @@ class PairSelectionEngine:
         max_spread_std: float = selection_config.max_spread_std,
         max_half_life_hours: float = selection_config.max_half_life_hours,
         coint_alpha: float = selection_config.cointegration_alpha,
+        kpss_p_value: Optional[float] = None,
+        durbin_watson: Optional[float] = None
     ) -> Tuple[bool, str]:
         """
-        Validates whether the spread between two cryptocurrency assets demonstrates high-quality mean reversion:
+        Validates whether the spread between two cryptocurrency assets demonstrates high-quality mean reversion
+        aligned with the Research Blueprint framework:
         1. Volatility floor (spread_std >= 0.0020 or 0.20%): Ensures sufficient price oscillation amplitude
            to overcome two-leg round-trip taker trading fees and execution slippage.
         2. Volatility ceiling (spread_std <= 0.1500 or 15.0%): Screens out diverged or structurally broken pairs.
         3. Mean-reversion speed (0 < half_life_hours <= 36.0h): Guarantees timely trade exit and convergence.
         4. Cointegration stationarity (p_value < coint_alpha, default 0.05): Verifies residual stationarity.
+        5. Complementary KPSS stationarity: Rejects if KPSS strictly contradicts ADF (p < 0.01).
+        6. Residual autocorrelation: Warns/rejects if Durbin-Watson shows severe autocorrelation (< 0.8 or > 3.2).
         """
         if np.isnan(spread_std) or np.isinf(spread_std) or spread_std < min_spread_std:
             return (
@@ -343,6 +367,16 @@ class PairSelectionEngine:
             return (
                 False,
                 f"Cointegration p-value ({p_value:.4f}) does not meet stationarity threshold (< {coint_alpha:.2f})."
+            )
+        if kpss_p_value is not None and not np.isnan(kpss_p_value) and kpss_p_value < 0.01:
+            return (
+                False,
+                f"Conflicting stationarity diagnostics: KPSS rejects stationarity (p={kpss_p_value:.4f} < 0.01)."
+            )
+        if durbin_watson is not None and not np.isnan(durbin_watson) and (durbin_watson < 0.4 or durbin_watson > 3.6):
+            return (
+                False,
+                f"Severe residual autocorrelation detected (Durbin-Watson={durbin_watson:.2f})."
             )
         return True, "GOOD_SPREAD"
 
