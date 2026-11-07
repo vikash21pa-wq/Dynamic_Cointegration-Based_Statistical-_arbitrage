@@ -28,7 +28,7 @@ from config import (
     PROCESSED_DATA_DIR,
     RESULTS_DIR
 )
-from src.paper_trader import PaperTradingEngine
+from src.paper_trader import PaperTradingEngine, PaperAccount
 
 
 def mask_key(key: str) -> str:
@@ -72,6 +72,77 @@ def print_dashboard(snapshot: dict, api_key: str, mode: str = "LIVE"):
     print(f" Total Net Equity    : ${snapshot['total_equity']:,.2f} ({snapshot['pnl_pct']:+.2f}%)")
     print(f" Completed Trades    : {snapshot['total_trades']:<6} | Total Fees Paid: ${snapshot['fees_paid']:,.2f}")
     print("=" * 76, flush=True)
+
+
+def print_dashboard_multi(snapshots: list, api_key: str, mode: str = "LIVE"):
+    """Renders a real-time ASCII trading terminal dashboard for dual active pairs."""
+    if sys.stdout.isatty():
+        os.system("cls" if os.name == "nt" else "clear")
+    exchange_name = snapshots[0].get("exchange", "DELTA") if snapshots else "DELTA"
+    total_equity = snapshots[0].get("total_equity", 10000.0) if snapshots else 10000.0
+    cash_balance = snapshots[0].get("cash_balance", 10000.0) if snapshots else 10000.0
+    free_margin = snapshots[0].get("free_margin", cash_balance) if snapshots else cash_balance
+    realized_pnl = snapshots[0].get("realized_pnl", 0.0) if snapshots else 0.0
+    total_unrealized = sum(s.get("unrealized_pnl", 0.0) for s in snapshots)
+    total_trades = sum(s.get("total_trades", 0) for s in snapshots)
+    total_fees = sum(s.get("fees_paid", 0.0) for s in snapshots)
+    pnl_pct = snapshots[0].get("pnl_pct", 0.0) if snapshots else 0.0
+    timestamp = snapshots[0].get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")) if snapshots else ""
+
+    print("=" * 80)
+    print(f"      {exchange_name} FUTURES STATISTICAL ARBITRAGE DUAL-PAIR PAPER TRADER")
+    print("=" * 80)
+    print(f" Mode: {mode:<18} | API Key: {mask_key(api_key):<20} | Time: {timestamp}")
+    print(f" Portfolio Equity: ${total_equity:,.2f} ({pnl_pct:+.2f}%) | Cash: ${cash_balance:,.2f} | Free Margin: ${free_margin:,.2f}")
+    print(f" Total Realized PnL: ${realized_pnl:+,.2f} | Unrealized PnL: ${total_unrealized:+,.2f} | Trades: {total_trades}")
+    print("=" * 80)
+
+    for idx, snap in enumerate(snapshots, 1):
+        pair = snap["pair"]
+        pos_desc = "FLAT (No Open Position)"
+        if snap["position_state"] == 1:
+            pos_desc = f"LONG SPREAD (+{pair.split('/')[0]}, -{pair.split('/')[1]})"
+        elif snap["position_state"] == -1:
+            pos_desc = f"SHORT SPREAD (-{pair.split('/')[0]}, +{pair.split('/')[1]})"
+
+        feed = snap.get("feed_source", "WS_STREAM")
+        print(f" [{idx}] PAIR: {pair:<16} │ Alloc: {trading_config.pair_gross_allocation*100:.0f}% │ Feed: {feed}")
+        print(f"     Price A: ${snap['price_a']:<12,.2f} │ Price B: ${snap['price_b']:<12,.2f} │ Spread: {snap['spread']:+.6f}")
+        print(f"     Mean: {snap['rolling_mean']:+.6f}   │ Std: {snap['rolling_std']:.6f}       │ Z-Score: {snap['zscore']:+.2f}")
+        print(f"     Position: {pos_desc:<25} │ Action: {snap['action']} {('('+snap['reason']+')' if snap['reason'] else '')}")
+        print(f"     Unrealized PnL: ${snap['unrealized_pnl']:+,.2f}  │ Candle: {snap.get('candle_progress_pct', 0.0):.1f}% ({snap.get('candle_elapsed_seconds', 0)}s/300s)")
+        print("-" * 80)
+    print("=" * 80, flush=True)
+
+
+def run_live_multi(engines: list, interval: int = 3, api_key: Optional[str] = None):
+    """Continuous live market price monitoring loop running multiple pairs simultaneously."""
+    key = api_key or (delta_config.api_key if engines[0].exchange == "delta" else paper_config.api_key)
+    pairs_label = " & ".join(e.pair_name for e in engines)
+    print(f"Starting Multi-Pair Live Monitor for [{pairs_label}] with {engines[0].exchange.upper()} WebSocket... (Press Ctrl+C to stop)")
+    for eng in engines:
+        eng.start_price_stream()
+
+    last_snapshots = {}
+    try:
+        while True:
+            for eng in engines:
+                p_a, p_b = eng.fetch_live_prices()
+                if p_a is not None and p_b is not None:
+                    snap = eng.process_tick(p_a, p_b)
+                    last_snapshots[eng.pair_name] = snap
+
+            if last_snapshots:
+                feed_label = f"LIVE ({engines[0].exchange.upper()} WS)"
+                print_dashboard_multi(list(last_snapshots.values()), key, mode=feed_label)
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Live ticks pending for [{pairs_label}]. Retrying in {interval}s...")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nMulti-pair paper trading stopped by user.")
+    finally:
+        for eng in engines:
+            eng.stop_price_stream()
 
 
 def run_live(engine: PaperTradingEngine, interval: int = 5, api_key: Optional[str] = None):
@@ -206,6 +277,27 @@ Examples:
         show_status()
         sys.exit(0)
 
+    api_key_to_display = delta_config.api_key if args.exchange == "delta" else paper_config.api_key
+
+    # Check if user requested multi-pair concurrent execution (or defaulted to live without specific pair)
+    configured_pairs = getattr(delta_config, "active_pairs", ["BTCUSD/ETHUSD", "SOLUSD/AVAXUSD"]) if args.exchange == "delta" else getattr(paper_config, "active_pairs", ["BTCUSDT/ETHUSDT", "SOLUSDT/AVAXUSDT"])
+    run_both = args.pair is None or args.pair.strip().lower() in ("all", "both", "multi")
+
+    if run_both and args.live:
+        print(f"Initializing Dual-Pair Concurrent Paper Trading Engine: {configured_pairs}")
+        shared_account = PaperAccount(initial_balance=args.capital, leverage=trading_config.leverage)
+        engines = [
+            PaperTradingEngine(
+                pair=p,
+                initial_capital=args.capital,
+                exchange=args.exchange,
+                account=shared_account
+            )
+            for p in configured_pairs
+        ]
+        run_live_multi(engines, interval=args.interval, api_key=api_key_to_display)
+        sys.exit(0)
+
     target_pair = args.pair
     if target_pair is None:
         target_pair = "BTCUSD/ETHUSD" if args.exchange == "delta" else "BTCUSDT/ETHUSDT"
@@ -215,8 +307,6 @@ Examples:
         initial_capital=args.capital,
         exchange=args.exchange
     )
-
-    api_key_to_display = delta_config.api_key if args.exchange == "delta" else paper_config.api_key
 
     if args.once:
         run_single_tick(engine, api_key=api_key_to_display)

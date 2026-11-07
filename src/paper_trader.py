@@ -544,7 +544,8 @@ class PaperTradingEngine:
         recover_state: bool = True,
         leverage: float = trading_config.leverage,
         maintenance_margin_pct: Optional[float] = None,
-        exchange: Optional[str] = None
+        exchange: Optional[str] = None,
+        account: Optional[PaperAccount] = None
     ):
         parts = pair.replace("-", "/").split("/")
         self.asset_a = parts[0].upper()
@@ -574,11 +575,14 @@ class PaperTradingEngine:
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        self.account = PaperAccount(
-            initial_balance=initial_capital,
-            leverage=leverage,
-            maintenance_margin_pct=maintenance_margin_pct
-        )
+        if account is not None:
+            self.account = account
+        else:
+            self.account = PaperAccount(
+                initial_balance=initial_capital,
+                leverage=leverage,
+                maintenance_margin_pct=maintenance_margin_pct
+            )
         self.leverage = self.account.leverage
         self.last_rejection_reason: Optional[str] = None
         self.last_funding_period_id: Optional[int] = None
@@ -1558,10 +1562,16 @@ class PaperTradingEngine:
         logger.info(f"[{timestamp_str}] CLOSED SPREAD ({reason}) | Net PnL: ${net_trade_pnl:+,.2f} | Equity: ${self.account.cash_balance:,.2f}")
 
     def _save_state(self, snapshot: Dict[str, Any]):
-        """Persists live state and trade logs to disk."""
+        """Persists live state and trade logs to disk with pair-specific namespacing."""
         state_file = self.results_dir / "paper_trading_state.json"
-        with open(state_file, "w") as f:
-            json.dump(snapshot, f, indent=4)
+        pair_state_file = self.results_dir / f"paper_trading_state_{self.asset_a}_{self.asset_b}.json"
+        try:
+            with open(state_file, "w") as f:
+                json.dump(snapshot, f, indent=4)
+            with open(pair_state_file, "w") as f:
+                json.dump(snapshot, f, indent=4)
+        except Exception as e:
+            logger.debug(f"Error persisting state snapshot for {self.pair_name}: {e}")
 
         if self.account.closed_trades:
             trades_df = pd.DataFrame(self.account.closed_trades)
@@ -1588,7 +1598,8 @@ class PaperTradingEngine:
         Returns:
           True if state was successfully recovered from disk, False otherwise.
         """
-        state_file = self.results_dir / "paper_trading_state.json"
+        pair_state_file = self.results_dir / f"paper_trading_state_{self.asset_a}_{self.asset_b}.json"
+        state_file = pair_state_file if pair_state_file.exists() else (self.results_dir / "paper_trading_state.json")
         trades_file = self.results_dir / "paper_trades.csv"
         funding_file = self.results_dir / "paper_funding.csv"
 
