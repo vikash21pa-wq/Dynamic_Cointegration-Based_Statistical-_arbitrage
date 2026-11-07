@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 import pandas as pd
 import numpy as np
 
@@ -66,7 +71,7 @@ def print_dashboard(snapshot: dict, api_key: str, mode: str = "LIVE"):
     print(f" Realized PnL        : ${snapshot['realized_pnl']:+,.2f} | Feed Source: {snapshot.get('feed_source', 'REST_POLLING')}")
     print(f" Total Net Equity    : ${snapshot['total_equity']:,.2f} ({snapshot['pnl_pct']:+.2f}%)")
     print(f" Completed Trades    : {snapshot['total_trades']:<6} | Total Fees Paid: ${snapshot['fees_paid']:,.2f}")
-    print("=" * 76)
+    print("=" * 76, flush=True)
 
 
 def run_live(engine: PaperTradingEngine, interval: int = 5, api_key: Optional[str] = None):
