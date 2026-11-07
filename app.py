@@ -379,6 +379,7 @@ async def list_available_pairs():
     # Curated top candidate pairs according to active exchange
     curated_delta = [
         {"pair": "BTCUSD/ETHUSD", "exchange": "DELTA", "correlation": 0.815, "beta": 1.1520, "alpha": 1.4800, "coint_t_stat": -4.25, "half_life_hours": "1.2h", "eligible": True},
+        {"pair": "SOLUSD/AVAXUSD", "exchange": "DELTA", "correlation": 0.892, "beta": 0.7412, "alpha": 6.9580, "coint_t_stat": -3.65, "half_life_hours": "18.7h", "eligible": True},
         {"pair": "BNBUSD/LINKUSD", "exchange": "DELTA", "correlation": 0.651, "beta": 0.3437, "alpha": 5.7238, "coint_t_stat": -3.82, "half_life_hours": "3.4h", "eligible": True},
         {"pair": "AVAXUSD/BNBUSD", "exchange": "DELTA", "correlation": 0.589, "beta": 1.5613, "alpha": -1.2150, "coint_t_stat": -3.54, "half_life_hours": "2.8h", "eligible": True},
         {"pair": "ADAUSD/LTCUSD", "exchange": "DELTA", "correlation": 0.670, "beta": 0.8813, "alpha": -2.3100, "coint_t_stat": -3.39, "half_life_hours": "1.3h", "eligible": True},

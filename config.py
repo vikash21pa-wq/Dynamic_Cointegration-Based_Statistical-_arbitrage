@@ -121,6 +121,7 @@ class PaperTradingConfig:
     )
     initial_balance: float = 10000.0
     pair: str = "BTCUSDT/ETHUSDT"
+    active_pairs: List[str] = field(default_factory=lambda: ["BTCUSDT/ETHUSDT", "SOLUSDT/AVAXUSDT"])
     allocation_pct: float = 0.10
     poll_interval_seconds: int = 5
 
@@ -131,6 +132,7 @@ class DeltaConfig:
     api_secret: str = field(default_factory=lambda: os.getenv("DELTA_API_SECRET", "NTjv3v9Z0xWPQ8PGBUParbEaYc3pHPrmvzc9ogqjt6Z6nwARfqqVNPLQCCce"))
     environment: str = field(default_factory=lambda: os.getenv("DELTA_ENVIRONMENT", "india").lower())
     default_pair: str = "BTCUSD/ETHUSD"
+    active_pairs: List[str] = field(default_factory=lambda: ["BTCUSD/ETHUSD", "SOLUSD/AVAXUSD"])
     universe: List[str] = field(default_factory=lambda: [
         "BTCUSD",
         "ETHUSD",

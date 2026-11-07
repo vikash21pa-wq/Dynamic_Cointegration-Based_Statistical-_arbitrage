@@ -713,6 +713,9 @@ class PaperTradingEngine:
         if self.pair_name in ["BTCUSDT/ETHUSDT", "BTCUSD/ETHUSD"]:
             logger.info(f"Using default parameters for {self.pair_name}: Alpha=1.4648, Beta=1.1678")
             return 1.4648, 1.1678
+        if self.pair_name in ["SOLUSDT/AVAXUSDT", "SOLUSD/AVAXUSD"]:
+            logger.info(f"Using default parameters for {self.pair_name}: Alpha=6.9580, Beta=0.7412")
+            return 6.9580, 0.7412
         logger.info(f"Using standard default parameters for {self.pair_name}: Alpha=0.0, Beta=1.0")
         return 0.0, 1.0
 
